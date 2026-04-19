@@ -32,7 +32,10 @@ demo = true
 
 [risk]
 # Check 1: staleness
-max_tick_age_ms = 500
+# Swing-trading cadence: 4h Donchian decisions do not need sub-second
+# freshness. 10s is tight enough to catch real feed outages and loose
+# enough to survive brief gaps in low-volume hours.
+max_tick_age_ms = 10000
 
 # Check 2: spread & liquidity
 max_spread_bps = "20"

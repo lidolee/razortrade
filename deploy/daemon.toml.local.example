@@ -30,7 +30,9 @@ products = ["PI_XBTUSD"]
 demo = true
 
 [risk]
-max_tick_age_ms = 500
+# Demo environment has very low trade volume. Only catch total feed
+# outages here. Production uses a much stricter value.
+max_tick_age_ms = 60000
 max_spread_bps = "20"
 min_book_depth_multiple = "3"
 book_depth_levels = 5
