@@ -71,6 +71,23 @@ pub struct EquitySnapshotRow {
     pub cash_chf: String,
     pub realized_pnl_leverage_lifetime: String,
     pub drawdown_fraction: String,
+    // Added by migration 20260419000002_nav_tracking.sql.
+    pub unrealized_pnl_leverage_chf: String,
+    pub nav_per_unit: String,
+    pub nav_hwm_per_unit: String,
+    pub total_units: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CapitalFlowRow {
+    pub id: i64,
+    pub timestamp: String,
+    pub amount_chf: String,
+    pub flow_type: String,
+    pub source: Option<String>,
+    pub units_minted: Option<String>,
+    pub nav_at_flow: Option<String>,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

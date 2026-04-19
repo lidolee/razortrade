@@ -4,14 +4,16 @@
 //! This is deliberately small. We add methods as the daemon requires them,
 //! not speculatively.
 
-use crate::models::{KillSwitchEventRow, SignalRow};
+use crate::models::{
+    CapitalFlowRow, EquitySnapshotRow, KillSwitchEventRow, PositionRow, SignalRow,
+};
 use crate::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::SqlitePool;
 use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct Database {
     pool: SqlitePool,
@@ -226,5 +228,130 @@ impl Database {
         .execute(&self.pool)
         .await?;
         Ok(result.last_insert_rowid())
+    }
+
+    /// Fetch the most recent equity snapshot, or `None` if none exist yet.
+    pub async fn latest_equity_snapshot(&self) -> Result<Option<EquitySnapshotRow>> {
+        let row = sqlx::query_as::<_, EquitySnapshotRow>(
+            r#"
+            SELECT id, timestamp, total_equity_chf, crypto_spot_value_chf,
+                   etf_value_chf, crypto_leverage_value_chf, cash_chf,
+                   realized_pnl_leverage_lifetime, drawdown_fraction,
+                   unrealized_pnl_leverage_chf, nav_per_unit,
+                   nav_hwm_per_unit, total_units
+            FROM equity_snapshots
+            ORDER BY timestamp DESC, id DESC
+            LIMIT 1
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// All open (not yet closed) positions, ordered by sleeve then symbol.
+    pub async fn open_positions(&self) -> Result<Vec<PositionRow>> {
+        let rows = sqlx::query_as::<_, PositionRow>(
+            r#"
+            SELECT id, instrument_symbol, broker, sleeve, quantity,
+                   avg_entry_price, leverage, liquidation_price,
+                   opened_at, updated_at, closed_at, realized_pnl_chf
+            FROM positions
+            WHERE closed_at IS NULL
+            ORDER BY sleeve, instrument_symbol
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Insert a new equity snapshot row. Caller must have already computed
+    /// every field including NAV-per-unit; this method does not reconcile.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_equity_snapshot(
+        &self,
+        timestamp_iso: &str,
+        total_equity_chf: &str,
+        crypto_spot_value_chf: &str,
+        etf_value_chf: &str,
+        crypto_leverage_value_chf: &str,
+        cash_chf: &str,
+        realized_pnl_leverage_lifetime: &str,
+        drawdown_fraction: &str,
+        unrealized_pnl_leverage_chf: &str,
+        nav_per_unit: &str,
+        nav_hwm_per_unit: &str,
+        total_units: &str,
+    ) -> Result<i64> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO equity_snapshots
+                (timestamp, total_equity_chf, crypto_spot_value_chf,
+                 etf_value_chf, crypto_leverage_value_chf, cash_chf,
+                 realized_pnl_leverage_lifetime, drawdown_fraction,
+                 unrealized_pnl_leverage_chf, nav_per_unit,
+                 nav_hwm_per_unit, total_units)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(timestamp_iso)
+        .bind(total_equity_chf)
+        .bind(crypto_spot_value_chf)
+        .bind(etf_value_chf)
+        .bind(crypto_leverage_value_chf)
+        .bind(cash_chf)
+        .bind(realized_pnl_leverage_lifetime)
+        .bind(drawdown_fraction)
+        .bind(unrealized_pnl_leverage_chf)
+        .bind(nav_per_unit)
+        .bind(nav_hwm_per_unit)
+        .bind(total_units)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.last_insert_rowid())
+    }
+
+    /// All capital flow rows, chronologically ordered.
+    pub async fn capital_flows(&self) -> Result<Vec<CapitalFlowRow>> {
+        let rows = sqlx::query_as::<_, CapitalFlowRow>(
+            r#"
+            SELECT id, timestamp, amount_chf, flow_type, source,
+                   units_minted, nav_at_flow, note
+            FROM capital_flows
+            ORDER BY timestamp ASC, id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Write a synthetic bootstrap equity snapshot for first-run initialisation.
+    /// Emits a warning log so operators notice. The values represent a
+    /// zero-capital starting state; real capital flows replace this once
+    /// the first deposit is recorded via `capital_flows`.
+    pub async fn write_bootstrap_equity_snapshot(&self, timestamp_iso: &str) -> Result<i64> {
+        warn!(
+            "no equity snapshots in database; writing synthetic bootstrap \
+             snapshot (NAV=1, units=1, all sleeves zero). Record a capital \
+             flow via the capital_flows table before relying on hard_limit \
+             checks for real-money decisions."
+        );
+        self.insert_equity_snapshot(
+            timestamp_iso,
+            "0",  // total_equity_chf
+            "0",  // crypto_spot_value_chf
+            "0",  // etf_value_chf
+            "0",  // crypto_leverage_value_chf
+            "0",  // cash_chf
+            "0",  // realized_pnl_leverage_lifetime
+            "0",  // drawdown_fraction
+            "0",  // unrealized_pnl_leverage_chf
+            "1",  // nav_per_unit
+            "1",  // nav_hwm_per_unit
+            "1",  // total_units
+        )
+        .await
     }
 }

@@ -28,7 +28,7 @@ pub use checklist::{
     CheckOutcome, ChecklistResult, PreTradeCheck, PreTradeChecklist, PreTradeContext,
     RejectionReason,
 };
-pub use kill_switch::{KillSwitchDecision, KillSwitchEvaluator};
+pub use kill_switch::{KillSwitchDecision, KillSwitchEvaluator, KillSwitchReason};
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

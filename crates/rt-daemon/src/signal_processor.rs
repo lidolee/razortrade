@@ -3,8 +3,7 @@
 //! Polls the `signals` table at 1 Hz, and for each pending signal:
 //!
 //! 1. Builds a `MarketSnapshot` via [`MarketDataService`].
-//! 2. Builds a `PortfolioState` (currently stubbed; next drop will read
-//!    it from SQLite equity snapshots).
+//! 2. Loads the current `PortfolioState` from SQLite (bootstrap on first run).
 //! 3. Evaluates the pre-trade checklist.
 //! 4. Records the outcome in `checklist_evaluations` and updates the
 //!    `signals` row to `processed` or `rejected`.
@@ -28,7 +27,6 @@ use rt_core::execution_mode::ExecutionMode;
 use rt_core::instrument::Sleeve;
 use rt_core::market_data::MarketSnapshot;
 use rt_core::order::Side;
-use rt_core::portfolio::{PortfolioState, SleeveState};
 use rt_core::signal::{Signal, SignalStatus, SignalType};
 use rt_persistence::models::SignalRow;
 use rt_persistence::Database;
@@ -137,11 +135,30 @@ impl SignalProcessor {
             }
         };
 
-        // --- Build PortfolioState (stubbed) ----------------------------
-        // TODO(next-drop): load real state from `equity_snapshots` +
-        // open positions. For now, we use a safe placeholder so the
-        // checklist can still run and exercise the full pipeline.
-        let portfolio = stub_portfolio_state();
+        // --- Build PortfolioState from SQLite -------------------------
+        // On first run, the loader auto-writes a bootstrap snapshot so
+        // the pipeline is never blocked by a cold database. Real capital
+        // flows must be recorded via `capital_flows` before hard-limit
+        // decisions carry real-money weight.
+        let portfolio = match crate::portfolio_loader::load_portfolio_state(
+            &self.db,
+            Utc::now(),
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(error = %e, "portfolio state load failed; signal rejected");
+                let reason = serde_json::json!({
+                    "kind": "portfolio_state_unavailable",
+                    "detail": e.to_string(),
+                });
+                self.db
+                    .mark_signal_rejected(signal.id, &Utc::now().to_rfc3339(), &reason.to_string())
+                    .await?;
+                return Ok(());
+            }
+        };
 
         // --- Evaluate checklist ----------------------------------------
         let ctx = PreTradeContext {
@@ -354,38 +371,6 @@ fn market_data_error_to_json(e: MarketDataError) -> serde_json::Value {
         "kind": "market_data_unavailable",
         "detail": e.to_string(),
     })
-}
-
-/// Placeholder portfolio state until reconciliation is wired up.
-///
-/// Returns a "fresh" portfolio at NAV 1.00, no open positions, no realised
-/// losses, kill-switch inactive. This allows the checklist to run against
-/// real market data during the bring-up phase. Do NOT ship a production
-/// build with this.
-fn stub_portfolio_state() -> PortfolioState {
-    PortfolioState {
-        snapshot_at: Utc::now(),
-        sleeves: vec![
-            SleeveState {
-                sleeve: Sleeve::CryptoSpot,
-                market_value_chf: Decimal::ZERO,
-                cash_chf: Decimal::from(1_000),
-                realized_pnl_lifetime_chf: Decimal::ZERO,
-                unrealized_pnl_chf: Decimal::ZERO,
-            },
-            SleeveState {
-                sleeve: Sleeve::CryptoLeverage,
-                market_value_chf: Decimal::ZERO,
-                cash_chf: Decimal::ZERO,
-                realized_pnl_lifetime_chf: Decimal::ZERO,
-                unrealized_pnl_chf: Decimal::ZERO,
-            },
-        ],
-        nav_per_unit: Decimal::from(1),
-        nav_hwm_per_unit: Decimal::from(1),
-        total_units: Decimal::from(1_000),
-        kill_switch_active: false,
-    }
 }
 
 /// A structured description of what order would be submitted if we were

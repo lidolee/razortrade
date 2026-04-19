@@ -18,6 +18,7 @@
 //! systemd sends SIGTERM by default with a 15 s `TimeoutStopSec`.
 
 mod market_data;
+mod portfolio_loader;
 mod signal_processor;
 
 use anyhow::{Context, Result};
@@ -232,9 +233,10 @@ async fn main() -> Result<()> {
 
     let supervisor_handle = {
         let db = db.clone();
+        let cfg = risk_config.clone();
         let rx = shutdown_rx.clone();
         let interval = Duration::from_secs(config.kill_switch_check_interval_secs);
-        tokio::spawn(async move { run_kill_switch_supervisor(db, interval, rx).await })
+        tokio::spawn(async move { run_kill_switch_supervisor(db, cfg, interval, rx).await })
     };
 
     // ---- Wait for shutdown --------------------------------------------
@@ -254,21 +256,24 @@ async fn main() -> Result<()> {
 
 async fn run_kill_switch_supervisor(
     db: Arc<Database>,
+    config: Arc<RiskConfig>,
     interval: Duration,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    info!(interval_secs = interval.as_secs(), "kill-switch supervisor started");
+    info!(
+        interval_secs = interval.as_secs(),
+        "kill-switch supervisor started (evaluator active)"
+    );
 
     let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                match db.kill_switch_active().await {
-                    Ok(active) => tracing::debug!(active, "kill-switch state check"),
-                    Err(e) => tracing::warn!(error = %e, "kill-switch DB check failed"),
+                if let Err(e) = evaluate_kill_switch_once(&db, &config).await {
+                    error!(error = %e, "kill-switch evaluation iteration failed");
                 }
-                // TODO(next-drop): compute PortfolioState from equity_snapshots +
-                // positions, evaluate KillSwitchEvaluator, and persist on trigger.
             }
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
@@ -278,4 +283,76 @@ async fn run_kill_switch_supervisor(
             }
         }
     }
+}
+
+/// One supervisor iteration: load state, evaluate, persist on trigger.
+///
+/// Kept as a free function so it is trivially unit-testable with an
+/// in-memory SQLite database if we want to later.
+async fn evaluate_kill_switch_once(
+    db: &Arc<Database>,
+    config: &Arc<RiskConfig>,
+) -> anyhow::Result<()> {
+    use rt_risk::{KillSwitchDecision, KillSwitchEvaluator, KillSwitchReason};
+
+    let now = chrono::Utc::now();
+    let portfolio = crate::portfolio_loader::load_portfolio_state(db, now).await?;
+
+    // If the flag is already set in the database, the evaluator correctly
+    // returns NoChange. We still log the current state for observability.
+    if portfolio.kill_switch_active {
+        tracing::debug!(
+            nav = %portfolio.nav_per_unit,
+            realised_leverage = %portfolio.leverage_sleeve_realized_pnl(),
+            "kill-switch already active; no re-evaluation"
+        );
+        return Ok(());
+    }
+
+    let decision = KillSwitchEvaluator::evaluate(&portfolio, config.as_ref(), now);
+
+    match decision {
+        KillSwitchDecision::NoChange => {
+            tracing::debug!(
+                nav = %portfolio.nav_per_unit,
+                drawdown = %portfolio.drawdown_fraction(),
+                realised_leverage = %portfolio.leverage_sleeve_realized_pnl(),
+                "kill-switch state nominal"
+            );
+        }
+        KillSwitchDecision::Disable { reason, at } => {
+            // Stable reason_kind for SQL filtering, independent of the
+            // full JSON payload which carries the numeric detail.
+            let reason_kind = match &reason {
+                KillSwitchReason::LifetimeRealisedLossBudgetExhausted { .. } => {
+                    "lifetime_realised_loss_budget"
+                }
+                KillSwitchReason::PortfolioDrawdown { .. } => "portfolio_drawdown",
+                KillSwitchReason::ManualTrigger { .. } => "manual_trigger",
+            };
+
+            error!(
+                reason_kind,
+                summary = %reason.summary(),
+                "KILL-SWITCH TRIGGERED — leveraged trading will be refused \
+                 by pre-trade checklist until manually resolved"
+            );
+
+            let reason_json = serde_json::to_string(&reason)?;
+            let snapshot_json = serde_json::to_string(&portfolio)?;
+
+            let event_id = db
+                .record_kill_switch(
+                    &at.to_rfc3339(),
+                    reason_kind,
+                    &reason_json,
+                    &snapshot_json,
+                )
+                .await?;
+
+            info!(event_id, "kill-switch event persisted");
+        }
+    }
+
+    Ok(())
 }
