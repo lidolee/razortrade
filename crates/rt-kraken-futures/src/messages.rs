@@ -407,6 +407,7 @@ pub struct SendOrderResponse {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendStatus {
+    #[serde(rename = "order_id")]
     pub order_id: Option<String>,
     pub status: Option<String>,
     pub received_time: Option<String>,
@@ -423,6 +424,7 @@ pub struct CancelOrderResponse {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelStatus {
+    #[serde(rename = "order_id")]
     pub order_id: Option<String>,
     pub status: Option<String>,
     pub received_time: Option<String>,

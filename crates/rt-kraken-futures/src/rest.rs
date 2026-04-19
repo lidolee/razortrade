@@ -75,7 +75,7 @@ impl KrakenFuturesRestClient {
         // The endpoint path used for signing MUST match what Kraken's
         // server sees (i.e. the path after the host, without query string).
         let endpoint_path = format!("{}{}", REST_API_PREFIX, path);
-        let authent = sign_rest_request(&creds.api_secret_b64, query, &nonce, &endpoint_path)?;
+        let authent = sign_rest_request(&creds.api_secret_b64, query, &nonce, path)?;
 
         let mut url = format!("{}{}", self.base_url, endpoint_path);
         if !query.is_empty() {
@@ -97,9 +97,14 @@ impl KrakenFuturesRestClient {
     }
 
     /// Perform an authenticated POST with a JSON body.
-    ///
-    /// As of the Feb-2024 signing-scheme update, the signed `postData` is
-    /// the raw JSON body (not URL-encoded form data).
+    /// Authenticated POST with a JSON body. Used only by endpoints that
+    /// Kraken actually documents as accepting JSON (currently just the
+    /// batchorder endpoint, which takes a JSON string in the `json` query
+    /// parameter — not the HTTP body). Most trading endpoints (sendorder,
+    /// cancelorder, etc.) use [`Self::authed_post_form`] instead because
+    /// Kraken Futures signs and expects form-encoded post data per
+    /// <https://docs.kraken.com/api/docs/guides/futures-rest/>.
+    #[allow(dead_code)]
     async fn authed_post_json(&self, path: &str, body_json: &str) -> KrakenResult<String> {
         let creds = self.creds().map_err(|e| KrakenError::Api {
             code: None,
@@ -108,7 +113,7 @@ impl KrakenFuturesRestClient {
         let nonce = self.nonces.next()?;
         let endpoint_path = format!("{}{}", REST_API_PREFIX, path);
         let authent =
-            sign_rest_request(&creds.api_secret_b64, body_json, &nonce, &endpoint_path)?;
+            sign_rest_request(&creds.api_secret_b64, body_json, &nonce, path)?;
 
         let url = format!("{}{}", self.base_url, endpoint_path);
         debug!(%url, "authenticated POST (JSON)");
@@ -120,6 +125,37 @@ impl KrakenFuturesRestClient {
             .header("Authent", &authent)
             .header("Content-Type", "application/json")
             .body(body_json.to_string())
+            .send()
+            .await?;
+
+        self.read_response(response).await
+    }
+
+    /// Authenticated POST with form-encoded body.
+    ///
+    /// This is the correct shape for Kraken Futures trading endpoints like
+    /// `sendorder` and `cancelorder`. The signed `postData` is the exact
+    /// form-encoded string that is also sent as the request body.
+    async fn authed_post_form(&self, path: &str, form_body: &str) -> KrakenResult<String> {
+        let creds = self.creds().map_err(|e| KrakenError::Api {
+            code: None,
+            message: e.to_string(),
+        })?;
+        let nonce = self.nonces.next()?;
+        let endpoint_path = format!("{}{}", REST_API_PREFIX, path);
+        let authent =
+            sign_rest_request(&creds.api_secret_b64, form_body, &nonce, path)?;
+
+        let url = format!("{}{}", self.base_url, endpoint_path);
+        debug!(%url, body = form_body, "authenticated POST (form)");
+        let response = self
+            .http
+            .post(&url)
+            .header("APIKey", &creds.api_key)
+            .header("Nonce", &nonce)
+            .header("Authent", &authent)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(form_body.to_string())
             .send()
             .await?;
 
@@ -165,8 +201,13 @@ impl KrakenFuturesRestClient {
 
     #[instrument(skip(self))]
     pub async fn send_order(&self, req: &SendOrderRequest) -> KrakenResult<SendOrderResponse> {
-        let body = serde_json::to_string(req)?;
-        let text = self.authed_post_json("/api/v3/sendorder", &body).await?;
+        // Kraken Futures sendorder expects form-encoded body, NOT JSON.
+        // The auth signature is computed over the same form-encoded string.
+        let body = serde_urlencoded::to_string(req).map_err(|e| KrakenError::Api {
+            code: None,
+            message: format!("failed to urlencode SendOrderRequest: {e}"),
+        })?;
+        let text = self.authed_post_form("/api/v3/sendorder", &body).await?;
         let parsed: SendOrderResponse = serde_json::from_str(&text)?;
         if !matches!(parsed.result.as_str(), "success") {
             return Err(KrakenError::Api {
@@ -179,8 +220,14 @@ impl KrakenFuturesRestClient {
 
     #[instrument(skip(self))]
     pub async fn cancel_order_raw(&self, order_id: &str) -> KrakenResult<CancelOrderResponse> {
-        let body = serde_json::json!({ "order_id": order_id }).to_string();
-        let text = self.authed_post_json("/api/v3/cancelorder", &body).await?;
+        // cancelorder also uses form-encoded body.
+        let body = serde_urlencoded::to_string([("order_id", order_id)]).map_err(|e| {
+            KrakenError::Api {
+                code: None,
+                message: format!("failed to urlencode cancel params: {e}"),
+            }
+        })?;
+        let text = self.authed_post_form("/api/v3/cancelorder", &body).await?;
         let parsed: CancelOrderResponse = serde_json::from_str(&text)?;
         if !matches!(parsed.result.as_str(), "success") {
             return Err(KrakenError::Api {
