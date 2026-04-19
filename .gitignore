@@ -30,3 +30,8 @@ daemon.toml.local
 # Build logs
 /tmp/rf-*
 /tmp/rt-*
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
