@@ -34,7 +34,7 @@ demo = true
 # Check 1: staleness
 # Swing-trading cadence: 4h Donchian decisions do not need sub-second
 # freshness. 10s is tight enough to catch real feed outages and loose
-# enough to survive brief gaps in low-volume hours.
+# enough to survive brief low-volume hours.
 max_tick_age_ms = 10000
 
 # Check 2: spread & liquidity
@@ -54,3 +54,8 @@ max_leverage = "2"
 
 # Check 5: funding rate
 max_funding_rate_per_8h = "0.0002"
+
+# Check 6: notional cap
+# Per-order notional ceiling in CHF. Defensive cap against signal-generator
+# bugs. Default 1000 — override if you run larger sleeves.
+max_notional_chf_per_order = "1000"

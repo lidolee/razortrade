@@ -79,6 +79,10 @@ pub enum RejectionReason {
         requested: Decimal,
         cap: Decimal,
     },
+    NotionalTooLarge {
+        notional_chf: Decimal,
+        limit_chf: Decimal,
+    },
     KillSwitchActive,
     InvalidSignal {
         detail: String,
@@ -109,6 +113,8 @@ impl RejectionReason {
                 format!("funding rate {rate_per_8h}/8h exceeds limit {limit_per_8h}/8h"),
             Self::LeverageCapExceeded { requested, cap } =>
                 format!("requested leverage {requested}x exceeds cap {cap}x"),
+            Self::NotionalTooLarge { notional_chf, limit_chf } =>
+                format!("notional {notional_chf} CHF exceeds per-order cap {limit_chf} CHF"),
             Self::KillSwitchActive =>
                 "kill-switch is active; no leveraged trades accepted".to_string(),
             Self::InvalidSignal { detail } =>
@@ -193,6 +199,7 @@ impl PreTradeChecklist {
             Box::new(VolatilityRegimeCheck),
             Box::new(HardLimitCheck),
             Box::new(FundingRateCheck),
+            Box::new(NotionalCapCheck),
         ])
     }
 

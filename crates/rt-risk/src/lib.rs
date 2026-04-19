@@ -86,6 +86,23 @@ pub struct RiskConfig {
     /// Hard cap on leverage for the CryptoLeverage sleeve.
     /// Default: 2.0. Checklist rejects any signal with leverage > this value.
     pub max_leverage: Decimal,
+
+    /// Absolute cap on the notional size of a single order, in CHF.
+    /// Protects against signal-generator bugs that produce absurd
+    /// position sizes. This is a per-order cap and is evaluated
+    /// independently of the leverage sleeve's P&L budget. Default:
+    /// 1000 CHF — well above the 300-500 CHF MVP sleeves but well
+    /// below anything that would cause meaningful harm.
+    ///
+    /// `#[serde(default)]` means configs predating this field will
+    /// load with the default value rather than failing to parse.
+    /// Operators tuning this should explicitly set it in daemon.toml.
+    #[serde(default = "default_max_notional_chf_per_order")]
+    pub max_notional_chf_per_order: Decimal,
+}
+
+fn default_max_notional_chf_per_order() -> Decimal {
+    Decimal::from(1000)
 }
 
 impl Default for RiskConfig {
@@ -106,6 +123,7 @@ impl Default for RiskConfig {
             // 0.0002
             max_funding_rate_per_8h: Decimal::new(2, 4),
             max_leverage: Decimal::from(2),
+            max_notional_chf_per_order: default_max_notional_chf_per_order(),
         }
     }
 }
