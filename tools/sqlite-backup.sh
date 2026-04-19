@@ -46,3 +46,17 @@ find "$BACKUP_DIR" -maxdepth 1 -name '*.sqlite' -type f -mtime "+${RETENTION_DAY
 SIZE=$(stat -c%s "$TARGET")
 COUNT=$(find "$BACKUP_DIR" -maxdepth 1 -name '*.sqlite' -type f | wc -l)
 echo "backup ok: $TARGET (${SIZE} bytes); ${COUNT} backup(s) on disk (retention ${RETENTION_DAYS}d)"
+
+# --- Offsite push -----------------------------------------------------
+# Push the fresh snapshot to Hetzner Storage Box and rotate remote
+# copies. Failure here is logged but does not fail the whole backup:
+# the local snapshot is already safe on disk, and the next daily run
+# will try the push again.
+OFFSITE_SCRIPT=/usr/libexec/razortrade/offsite-push.sh
+if [[ -x "$OFFSITE_SCRIPT" ]]; then
+    if ! "$OFFSITE_SCRIPT"; then
+        echo "WARN: offsite push failed (exit $?) — local backup is intact; will retry next day" >&2
+    fi
+else
+    echo "note: $OFFSITE_SCRIPT not installed; skipping offsite push"
+fi

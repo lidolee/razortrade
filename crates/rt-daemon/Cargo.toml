@@ -63,6 +63,7 @@ assets = [
     # copies at 7 days. ThinkStation pulls separately — see
     # deploy/razortrade-backup-pull.*.
     { source = "../../tools/sqlite-backup.sh", dest = "/usr/libexec/razortrade/sqlite-backup.sh", mode = "0755" },
+    { source = "../../tools/offsite-push.sh", dest = "/usr/libexec/razortrade/offsite-push.sh", mode = "0755" },
     { source = "../../packaging/razortrade-backup.service", dest = "/usr/lib/systemd/system/razortrade-backup.service", mode = "0644" },
     { source = "../../packaging/razortrade-backup.timer", dest = "/usr/lib/systemd/system/razortrade-backup.timer", mode = "0644" },
 ]

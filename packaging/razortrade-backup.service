@@ -21,8 +21,10 @@ Group=razortrade
 ExecStart=/usr/libexec/razortrade/sqlite-backup.sh
 
 # --- Hardening ---------------------------------------------------------
-# No network needed — the script only touches the local DB and local
-# filesystem. Tighter than the daemon's profile accordingly.
+# Network IS needed — the script ssh's to the Hetzner Storage Box for
+# offsite push. Address families restricted to what rsync-over-SSH
+# needs. Access to /var/lib/razortrade covers both DB reads and the
+# .ssh keyring used by the offsite push.
 
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -34,7 +36,7 @@ ProtectKernelLogs=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
@@ -42,7 +44,6 @@ RestrictSUIDSGID=true
 SystemCallArchitectures=native
 PrivateDevices=true
 CapabilityBoundingSet=
-PrivateNetwork=true
 
 StandardOutput=journal
 StandardError=journal
