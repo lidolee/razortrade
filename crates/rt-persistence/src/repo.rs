@@ -780,6 +780,58 @@ impl Database {
         Ok(outcome)
     }
 
+    /// Check whether a fill has already been processed by the
+    /// reconciler. Keyed by `(broker, fill_id)` which the broker
+    /// guarantees globally unique for an account.
+    ///
+    /// This is the restart-resilient companion to the in-memory
+    /// `FillsRing::highest_seq()` watermark: the WS snapshot on
+    /// reconnect replays the full visible fill history, and without
+    /// this check the reconciler would re-apply every historical
+    /// fill to the orders and positions tables on every daemon start.
+    pub async fn has_fill_been_applied(
+        &self,
+        broker: &str,
+        fill_id: &str,
+    ) -> Result<bool> {
+        let row: Option<i64> = sqlx::query_scalar(
+            r#"SELECT 1 FROM applied_fills WHERE broker = ? AND fill_id = ?"#,
+        )
+        .bind(broker)
+        .bind(fill_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    /// Record that a fill has been processed. Uses `INSERT OR IGNORE`
+    /// so a race between two reconciler ticks (impossible by design
+    /// today, but cheap insurance) cannot fail the second writer.
+    ///
+    /// The fill is recorded even when it matched no local order —
+    /// "unknown order" is a stable terminal state, not a transient
+    /// failure, so recording it prevents the warning being repeated
+    /// at every subsequent restart.
+    pub async fn record_fill_applied(
+        &self,
+        broker: &str,
+        fill_id: &str,
+        applied_at_iso: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO applied_fills (broker, fill_id, applied_at)
+            VALUES (?, ?, ?)
+            "#,
+        )
+        .bind(broker)
+        .bind(fill_id)
+        .bind(applied_at_iso)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Fetch the most recent equity snapshot, or `None` if none exist yet.
     pub async fn latest_equity_snapshot(&self) -> Result<Option<EquitySnapshotRow>> {
         let row = sqlx::query_as::<_, EquitySnapshotRow>(

@@ -108,6 +108,31 @@ async fn reconcile_once(
     // next tick without skipping a fill.
     for fill in snapshot {
         let now_iso = Utc::now().to_rfc3339();
+
+        // Drop 6c: restart-resilient dedup. The in-memory
+        // `last_applied_seq` watermark only protects within a single
+        // daemon run; on reconnect the broker replays the full
+        // visible fill history. Check the database before we do any
+        // order- or position-level work.
+        match db.has_fill_been_applied(BROKER_TAG, &fill.fill_id).await {
+            Ok(true) => {
+                // Already processed in a previous run; advance the
+                // in-memory watermark and move on silently.
+                *last_applied_seq = (*last_applied_seq).max(fill.seq);
+                continue;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                error!(
+                    broker_order_id = %fill.order_id,
+                    fill_id = %fill.fill_id,
+                    error = %e,
+                    "could not check applied_fills table; will retry next tick"
+                );
+                return Err(Box::new(e));
+            }
+        }
+
         match db
             .apply_fill_to_order(
                 &fill.order_id,
@@ -148,6 +173,16 @@ async fn reconcile_once(
                             broker_order_id = %fill.order_id,
                             "fill applied to order but sleeve is unknown; position not updated"
                         );
+                        // Still mark the fill as applied — there is
+                        // no future state in which the sleeve becomes
+                        // known retroactively, so retrying would not
+                        // help.
+                        if let Err(e) =
+                            db.record_fill_applied(BROKER_TAG, &fill.fill_id, &now_iso).await
+                        {
+                            error!(error = %e, "record_fill_applied failed");
+                            return Err(Box::new(e));
+                        }
                         *last_applied_seq = (*last_applied_seq).max(fill.seq);
                         continue;
                     }
@@ -207,8 +242,27 @@ async fn reconcile_once(
                 return Err(Box::new(e));
             }
         }
+
+        // Record success (or stable-terminal "unknown order"). After
+        // this the fill will never be re-processed from the WS
+        // snapshot replay.
+        if let Err(e) = db.record_fill_applied(BROKER_TAG, &fill.fill_id, &now_iso).await {
+            error!(
+                fill_id = %fill.fill_id,
+                error = %e,
+                "record_fill_applied failed after successful apply; next tick will retry"
+            );
+            return Err(Box::new(e));
+        }
+
         *last_applied_seq = (*last_applied_seq).max(fill.seq);
     }
 
     Ok(())
 }
+
+/// The broker tag used for applied_fills rows. Hard-coded for now
+/// because this reconciler only handles Kraken Futures feeds; a
+/// multi-broker daemon would pipe this through from the feed's own
+/// identity.
+const BROKER_TAG: &str = "kraken_futures";
