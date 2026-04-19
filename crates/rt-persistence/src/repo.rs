@@ -1428,4 +1428,250 @@ mod tests {
             .await
             .expect("other query"));
     }
+
+    // ---------- apply_fill_to_order: Drop 10 -------------------
+
+    /// Insert a signal row and return its id. Signals back a paper
+    /// order in the tests below and provide the sleeve attribution
+    /// that apply_fill_to_order reads via LEFT JOIN.
+    async fn insert_test_signal(db: &Database, sleeve: &str) -> i64 {
+        let t = now();
+        let id: i64 = sqlx::query_scalar(
+            r#"
+            INSERT INTO signals
+                (created_at, instrument_symbol, side, signal_type,
+                 sleeve, notional_chf, leverage, status)
+            VALUES (?, 'PI_XBTUSD', 'buy', 'breakout',
+                    ?, '300', '1', 'pending')
+            RETURNING id
+            "#,
+        )
+        .bind(&t)
+        .bind(sleeve)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert signal");
+        id
+    }
+
+    /// Insert an orders row in the acknowledged state. This is the
+    /// state apply_fill_to_order expects — after the broker has
+    /// assigned a broker_order_id but before any fill has arrived.
+    async fn insert_test_order(
+        db: &Database,
+        signal_id: Option<i64>,
+        side: &str,
+        qty: &str,
+        broker_order_id: &str,
+    ) -> i64 {
+        let t = now();
+        let order_id = db
+            .insert_pending_order(
+                signal_id,
+                "kraken_futures",
+                "PI_XBTUSD",
+                side,
+                "post_only",
+                "gtc",
+                qty,
+                Some("50000"),
+                None,
+                &t,
+            )
+            .await
+            .expect("insert order");
+        db.mark_order_submitted(order_id, broker_order_id, "acknowledged", &t)
+            .await
+            .expect("mark submitted");
+        order_id
+    }
+
+    #[tokio::test]
+    async fn partial_fill_updates_quantity_and_sets_partially_filled_status() {
+        let db = test_db().await;
+        let sid = insert_test_signal(&db, "CryptoLeverage").await;
+        insert_test_order(&db, Some(sid), "buy", "100", "broker-uid-1").await;
+
+        let outcome = db
+            .apply_fill_to_order(
+                "broker-uid-1",
+                d(50),
+                d(50_000),
+                Decimal::ZERO,
+                &now(),
+            )
+            .await
+            .expect("apply")
+            .expect("order must be found");
+
+        assert_eq!(outcome.new_filled_quantity, d(50));
+        assert_eq!(outcome.new_avg_fill_price, d(50_000));
+        assert_eq!(outcome.new_status, "partially_filled");
+        assert!(!outcome.is_fully_filled);
+        assert_eq!(outcome.is_buy, true);
+    }
+
+    #[tokio::test]
+    async fn fill_matching_quantity_completes_order() {
+        let db = test_db().await;
+        let sid = insert_test_signal(&db, "CryptoLeverage").await;
+        insert_test_order(&db, Some(sid), "buy", "100", "broker-uid-2").await;
+
+        let outcome = db
+            .apply_fill_to_order("broker-uid-2", d(100), d(50_000), Decimal::ZERO, &now())
+            .await
+            .expect("apply")
+            .expect("found");
+
+        assert_eq!(outcome.new_filled_quantity, d(100));
+        assert_eq!(outcome.new_status, "filled");
+        assert!(outcome.is_fully_filled);
+    }
+
+    #[tokio::test]
+    async fn two_partial_fills_accumulate_with_weighted_average_price() {
+        let db = test_db().await;
+        let sid = insert_test_signal(&db, "CryptoLeverage").await;
+        insert_test_order(&db, Some(sid), "buy", "100", "broker-uid-3").await;
+
+        // First fill: 50 @ 50_000
+        db.apply_fill_to_order("broker-uid-3", d(50), d(50_000), Decimal::ZERO, &now())
+            .await
+            .expect("apply 1")
+            .expect("found");
+
+        // Second fill: 50 @ 60_000
+        let outcome = db
+            .apply_fill_to_order("broker-uid-3", d(50), d(60_000), Decimal::ZERO, &now())
+            .await
+            .expect("apply 2")
+            .expect("found");
+
+        assert_eq!(outcome.new_filled_quantity, d(100));
+        // Weighted average: (50*50k + 50*60k) / 100 = 55_000
+        assert_eq!(outcome.new_avg_fill_price, d(55_000));
+        assert_eq!(outcome.new_status, "filled");
+    }
+
+    #[tokio::test]
+    async fn fees_accumulate_across_fills() {
+        let db = test_db().await;
+        let sid = insert_test_signal(&db, "CryptoLeverage").await;
+        insert_test_order(&db, Some(sid), "buy", "100", "broker-uid-4").await;
+
+        // Using small explicit fees to test summation, not realism.
+        db.apply_fill_to_order(
+            "broker-uid-4",
+            d(50),
+            d(50_000),
+            Decimal::from_str("0.0001").unwrap(),
+            &now(),
+        )
+        .await
+        .expect("apply 1")
+        .expect("found");
+
+        let outcome = db
+            .apply_fill_to_order(
+                "broker-uid-4",
+                d(50),
+                d(50_000),
+                Decimal::from_str("0.0002").unwrap(),
+                &now(),
+            )
+            .await
+            .expect("apply 2")
+            .expect("found");
+
+        assert_eq!(outcome.new_fees_paid, Decimal::from_str("0.0003").unwrap());
+    }
+
+    #[tokio::test]
+    async fn unknown_broker_order_id_returns_none() {
+        let db = test_db().await;
+        // No order inserted at all.
+        let outcome = db
+            .apply_fill_to_order(
+                "never-seen-id",
+                d(10),
+                d(50_000),
+                Decimal::ZERO,
+                &now(),
+            )
+            .await
+            .expect("apply");
+        assert!(outcome.is_none());
+    }
+
+    #[tokio::test]
+    async fn status_does_not_regress_after_order_is_filled() {
+        let db = test_db().await;
+        let sid = insert_test_signal(&db, "CryptoLeverage").await;
+        insert_test_order(&db, Some(sid), "buy", "100", "broker-uid-5").await;
+
+        // Complete the order.
+        let o1 = db
+            .apply_fill_to_order("broker-uid-5", d(100), d(50_000), Decimal::ZERO, &now())
+            .await
+            .expect("apply 1")
+            .expect("found");
+        assert_eq!(o1.new_status, "filled");
+
+        // A stale late fill arrives — status must stay 'filled'.
+        let o2 = db
+            .apply_fill_to_order("broker-uid-5", d(5), d(50_000), Decimal::ZERO, &now())
+            .await
+            .expect("apply 2")
+            .expect("found");
+        assert_eq!(o2.new_status, "filled");
+        // Quantity keeps accumulating; that's a logging fact, not a
+        // correctness issue — applied_fills dedup (Drop 6c) prevents
+        // the same fill being applied twice in practice.
+    }
+
+    #[tokio::test]
+    async fn sleeve_propagates_from_signals_via_join() {
+        let db = test_db().await;
+        let sid = insert_test_signal(&db, "CryptoLeverage").await;
+        insert_test_order(&db, Some(sid), "buy", "100", "broker-uid-6").await;
+
+        let outcome = db
+            .apply_fill_to_order("broker-uid-6", d(100), d(50_000), Decimal::ZERO, &now())
+            .await
+            .expect("apply")
+            .expect("found");
+
+        assert_eq!(outcome.sleeve.as_deref(), Some("CryptoLeverage"));
+        assert_eq!(outcome.broker, "kraken_futures");
+        assert_eq!(outcome.instrument_symbol, "PI_XBTUSD");
+    }
+
+    #[tokio::test]
+    async fn sleeve_is_none_when_order_has_no_signal() {
+        let db = test_db().await;
+        insert_test_order(&db, None, "buy", "100", "broker-uid-7").await;
+
+        let outcome = db
+            .apply_fill_to_order("broker-uid-7", d(100), d(50_000), Decimal::ZERO, &now())
+            .await
+            .expect("apply")
+            .expect("found");
+
+        assert!(outcome.sleeve.is_none());
+    }
+
+    #[tokio::test]
+    async fn is_buy_flag_reflects_order_side() {
+        let db = test_db().await;
+        let sid = insert_test_signal(&db, "CryptoLeverage").await;
+        insert_test_order(&db, Some(sid), "sell", "100", "broker-uid-8").await;
+
+        let outcome = db
+            .apply_fill_to_order("broker-uid-8", d(100), d(50_000), Decimal::ZERO, &now())
+            .await
+            .expect("apply")
+            .expect("found");
+
+        assert_eq!(outcome.is_buy, false);
+    }
 }
