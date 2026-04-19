@@ -642,8 +642,32 @@ fn build_kraken_futures_order(
             "min_contracts": "1",
         }));
     }
+    // Drop 5.5a: absolute upper bound as a defensive sanity check.
+    // At 1 USD per contract and the 300-500 CHF sleeve sizing of the
+    // MVP, a legitimate signal should never ask for more than a few
+    // hundred contracts. A bug in the signal generator producing a
+    // huge notional is one of the most dangerous failure modes we
+    // can imagine (Kraken happily accepts orders up to the available
+    // margin), so we hard-cap well above normal but well below
+    // damaging and fail loudly. The risk-config `max_notional` check
+    // is separate and more nuanced; this is the belt to that
+    // suspenders.
+    const MAX_CONTRACTS_PER_ORDER: u32 = 10_000;
+    if quantity_contracts > Decimal::from(MAX_CONTRACTS_PER_ORDER) {
+        return Err(json!({
+            "kind": "above_maximum_contract_size",
+            "quantity_contracts": quantity_contracts.to_string(),
+            "max_contracts": MAX_CONTRACTS_PER_ORDER.to_string(),
+        }));
+    }
 
-    // --- Limit price (PostOnly: join our own side of the book) ---
+    // --- Limit price -------------------------------------------------
+    //
+    // For a PostOnly order we MUST stay on our own side of the book,
+    // otherwise Kraken rejects with post_order_failed_because_it_would_be_filled.
+    // So for a Buy we join (or sit below) the best bid; for a Sell we join
+    // (or sit above) the best ask. This is the opposite of what you'd
+    // do for an aggressive IOC/market fill.
     let limit_price = match signal.side {
         Side::Buy => market.order_book.bids.first().map(|l| l.price),
         Side::Sell => market.order_book.asks.first().map(|l| l.price),
