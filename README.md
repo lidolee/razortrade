@@ -130,6 +130,36 @@ snapshot, re-injecting a signal will get further and either land in
 Either way, no broker submission happens because the execution mode is
 `dry_run`.
 
+### Phase 3b: real Donchian-breakout signals from Kraken
+
+Instead of `inject_test_signal.py` (which always writes the same fake
+signal), the real signal generator pulls live BTC-perpetual candles
+from Kraken Futures public REST, computes a Donchian channel + ATR,
+and writes a signal only if the most recent close has broken out.
+
+```bash
+# Dry run: fetch, compute, report — do NOT write
+python3 tools/donchian_signal.py
+
+# Actually write the signal when a breakout is detected
+python3 tools/donchian_signal.py --commit
+
+# Tune
+python3 tools/donchian_signal.py \
+    --symbol PI_XBTUSD --resolution 4h \
+    --donchian 20 --atr 14 \
+    --notional 300 --leverage 2 \
+    --fx-quote-per-chf 1.10 \
+    --commit
+```
+
+No external Python dependencies (urllib + sqlite3 + decimal, stdlib
+only). Indicator maths lives in `tools/indicators.py` with 12 self-tests
+(run `python3 tools/indicators.py` to verify).
+
+For automated 4-hour cadence, this script is designed to be triggered
+by a systemd user timer. That wiring will ship with the RPM package.
+
 ## Production deployment (Hetzner CX32, Rocky Linux 10)
 
 See `docs/RUNBOOK.md` (not yet written). Summary:
