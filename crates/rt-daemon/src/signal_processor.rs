@@ -24,10 +24,11 @@ use std::time::Duration;
 
 use chrono::Utc;
 use rt_core::execution_mode::ExecutionMode;
-use rt_core::instrument::Sleeve;
+use rt_core::instrument::{AssetClass, Broker as BrokerKind, Instrument, Sleeve};
 use rt_core::market_data::MarketSnapshot;
-use rt_core::order::Side;
+use rt_core::order::{Order, OrderStatus, OrderType, Side, TimeInForce};
 use rt_core::signal::{Signal, SignalStatus, SignalType};
+use rt_execution::{Broker, ExecutionError};
 use rt_persistence::models::SignalRow;
 use rt_persistence::Database;
 use rt_risk::{PreTradeChecklist, PreTradeContext, RiskConfig};
@@ -43,6 +44,10 @@ pub struct SignalProcessor {
     risk_config: Arc<RiskConfig>,
     market_data: Arc<MarketDataService>,
     execution_mode: ExecutionMode,
+    /// Broker for the CryptoLeverage sleeve (Kraken Futures).
+    /// `None` in DryRun mode; required in Paper/Live mode. Startup in
+    /// Paper/Live without this set is prevented by main.rs.
+    crypto_leverage_broker: Option<Arc<dyn Broker>>,
 }
 
 impl SignalProcessor {
@@ -52,6 +57,7 @@ impl SignalProcessor {
         risk_config: Arc<RiskConfig>,
         market_data: Arc<MarketDataService>,
         execution_mode: ExecutionMode,
+        crypto_leverage_broker: Option<Arc<dyn Broker>>,
     ) -> Self {
         Self {
             db,
@@ -59,6 +65,7 @@ impl SignalProcessor {
             risk_config,
             market_data,
             execution_mode,
+            crypto_leverage_broker,
         }
     }
 
@@ -220,27 +227,164 @@ impl SignalProcessor {
         match self.execution_mode {
             ExecutionMode::DryRun => self.record_dry_run_intent(signal, market).await,
             ExecutionMode::Paper | ExecutionMode::Live => {
-                warn!(
+                self.submit_via_broker(signal, market).await
+            }
+        }
+    }
+
+    /// Real broker submission path (Paper and Live).
+    ///
+    /// Currently only the `CryptoLeverage` sleeve is implemented; `CryptoSpot`
+    /// and `Etf` reject with a structured reason until their brokers are
+    /// wired in a later drop. This is deliberate: silent no-ops or fallbacks
+    /// here could lead to the system thinking a trade happened when it didn't.
+    #[instrument(skip(self, signal, market), fields(signal_id = signal.id))]
+    async fn submit_via_broker(
+        &self,
+        signal: &Signal,
+        market: &MarketSnapshot,
+    ) -> anyhow::Result<()> {
+        // -- Routing guard: only CryptoLeverage in this drop -------------
+        if signal.sleeve != Sleeve::CryptoLeverage {
+            warn!(
+                sleeve = ?signal.sleeve,
+                mode = ?self.execution_mode,
+                "sleeve not yet implemented for Paper/Live; rejecting signal"
+            );
+            let reason = serde_json::json!({
+                "kind": "sleeve_not_implemented",
+                "sleeve": enum_to_snake_case(&signal.sleeve)?,
+                "detail": "only CryptoLeverage (Kraken Futures) is wired in drop 4",
+            });
+            self.db
+                .mark_signal_rejected(
+                    signal.id,
+                    &Utc::now().to_rfc3339(),
+                    &reason.to_string(),
+                )
+                .await?;
+            return Ok(());
+        }
+
+        // -- Broker presence ---------------------------------------------
+        let broker = match &self.crypto_leverage_broker {
+            Some(b) => b.clone(),
+            None => {
+                // Shouldn't happen: main.rs refuses to start in Paper/Live
+                // without a broker. Treat as a programming error, reject
+                // loudly, keep running.
+                error!(
                     mode = ?self.execution_mode,
-                    "execution mode selected but broker submission not yet wired; \
-                     signal will be recorded as rejected to avoid a silent drop"
+                    "no crypto_leverage_broker configured despite non-DryRun mode; \
+                     this is a startup-time invariant violation"
                 );
-                let reason_json = serde_json::json!({
-                    "kind": "execution_mode_unavailable",
-                    "mode": serde_json::to_value(self.execution_mode)
-                        .unwrap_or_else(|_| serde_json::Value::String("unknown".into())),
-                    "detail": "broker submission wiring not implemented yet",
+                let reason = serde_json::json!({
+                    "kind": "broker_not_configured",
+                    "mode": enum_to_snake_case(&self.execution_mode)?,
                 });
                 self.db
                     .mark_signal_rejected(
                         signal.id,
                         &Utc::now().to_rfc3339(),
-                        &reason_json.to_string(),
+                        &reason.to_string(),
                     )
                     .await?;
-                Ok(())
+                return Ok(());
+            }
+        };
+
+        // -- Build the order with Kraken-Futures contract semantics ------
+        let order = match build_kraken_futures_order(signal, market) {
+            Ok(o) => o,
+            Err(reason_obj) => {
+                warn!(reason = %reason_obj, "failed to build order from signal");
+                self.db
+                    .mark_signal_rejected(
+                        signal.id,
+                        &Utc::now().to_rfc3339(),
+                        &reason_obj.to_string(),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        // -- Persist as pending before touching the network --------------
+        //
+        // If the process crashes between insert_pending_order and the
+        // broker response, reconciliation on next startup can list open
+        // orders on Kraken and match them by cli_ord_id. For now we rely
+        // on the manual operator check; this is acceptable for demo /
+        // 300-CHF phase.
+        let now_iso = Utc::now().to_rfc3339();
+        let order_type_str = enum_to_snake_case(&order.order_type)?;
+        let tif_str = enum_to_snake_case(&order.time_in_force)?;
+        let side_str = enum_to_snake_case(&order.side)?;
+
+        let order_id = self
+            .db
+            .insert_pending_order(
+                Some(signal.id),
+                "kraken_futures",
+                &order.instrument.symbol,
+                &side_str,
+                &order_type_str,
+                &tif_str,
+                &order.quantity.to_string(),
+                order.limit_price.map(|p| p.to_string()).as_deref(),
+                None,
+                &now_iso,
+            )
+            .await?;
+
+        info!(
+            order_id,
+            symbol = %order.instrument.symbol,
+            side = ?order.side,
+            quantity_contracts = %order.quantity,
+            limit_price = ?order.limit_price,
+            mode = ?self.execution_mode,
+            "submitting order to Kraken Futures"
+        );
+
+        // -- Hand off to the broker --------------------------------------
+        let result = broker.submit_order(&order).await;
+        let submit_iso = Utc::now().to_rfc3339();
+
+        match result {
+            Ok(sub) => {
+                let status_str = order_status_to_string(sub.status);
+                info!(
+                    order_id,
+                    broker_order_id = %sub.broker_order_id,
+                    status = %status_str,
+                    "order submitted successfully"
+                );
+                self.db
+                    .mark_order_submitted(order_id, &sub.broker_order_id, &status_str, &submit_iso)
+                    .await?;
+                self.db
+                    .mark_signal_processed(signal.id, &submit_iso)
+                    .await?;
+            }
+            Err(err) => {
+                error!(order_id, error = %err, "broker rejected or failed order submission");
+                let err_string = err.to_string();
+                self.db
+                    .mark_order_failed(order_id, &err_string, &submit_iso)
+                    .await?;
+                let reason = serde_json::json!({
+                    "kind": broker_error_kind(&err),
+                    "order_id": order_id,
+                    "detail": err_string,
+                });
+                self.db
+                    .mark_signal_rejected(signal.id, &submit_iso, &reason.to_string())
+                    .await?;
             }
         }
+
+        Ok(())
     }
 
     /// Build an order intent from an approved signal + current market,
@@ -439,6 +583,139 @@ fn broker_hint_for_sleeve(sleeve: Sleeve) -> &'static str {
         Sleeve::CryptoLeverage => "kraken_futures",
         Sleeve::Etf => "ibkr",
         Sleeve::CashYield => "ibkr",
+    }
+}
+
+/// Build a Kraken Futures order from an approved CryptoLeverage signal.
+///
+/// # Contract semantics — read this before touching
+///
+/// PI_XBTUSD is a Coin-M inverse perpetual. Kraken's `size` field in the
+/// sendorder payload is the **integer number of contracts**, and every
+/// PI contract is worth exactly 1 USD of notional. Source:
+/// <https://support.kraken.com/articles/360022829971> ("You buy 100,000
+/// PI_BTCUSD contracts at $35,000. Each contract is worth $1...").
+///
+/// Therefore:
+///   notional_usd      = notional_chf * fx_usd_per_chf
+///   quantity_contracts = floor(notional_usd)   // integer contracts
+///
+/// This is fundamentally different from the dry-run intent, which reports
+/// an approximate BTC-denominated quantity purely for operator reading.
+/// Do NOT unify the two paths.
+///
+/// We set PostOnly + GTC and use the current best bid/ask as the limit
+/// price. PostOnly guarantees maker-side execution: Kraken will reject
+/// the order rather than cross the spread, which is the safer default
+/// for the demo phase.
+fn build_kraken_futures_order(
+    signal: &Signal,
+    market: &MarketSnapshot,
+) -> Result<Order, serde_json::Value> {
+    use serde_json::json;
+
+    // --- FX rate -----------------------------------------------------
+    let fx = market.fx_quote_per_chf;
+    if fx <= Decimal::ZERO {
+        return Err(json!({
+            "kind": "invalid_fx_rate",
+            "fx_quote_per_chf": fx.to_string(),
+        }));
+    }
+
+    // --- Contract quantity (integer!) --------------------------------
+    let notional_usd = match signal.notional_chf.checked_mul(fx) {
+        Some(v) => v,
+        None => {
+            return Err(json!({
+                "kind": "notional_overflow",
+                "notional_chf": signal.notional_chf.to_string(),
+                "fx_quote_per_chf": fx.to_string(),
+            }))
+        }
+    };
+    let quantity_contracts = notional_usd.floor();
+    if quantity_contracts < Decimal::ONE {
+        return Err(json!({
+            "kind": "below_minimum_contract_size",
+            "notional_usd": notional_usd.to_string(),
+            "min_contracts": "1",
+        }));
+    }
+
+    // --- Limit price -------------------------------------------------
+    let limit_price = match signal.side {
+        Side::Buy => market.order_book.asks.first().map(|l| l.price),
+        Side::Sell => market.order_book.bids.first().map(|l| l.price),
+    };
+    let limit_price = match limit_price {
+        Some(p) if p > Decimal::ZERO => p,
+        _ => {
+            return Err(json!({
+                "kind": "no_limit_price",
+                "reason": "empty or invalid side of the order book",
+            }))
+        }
+    };
+
+    let now = Utc::now();
+    Ok(Order {
+        id: 0, // local id is assigned by SQLite on insert
+        signal_id: Some(signal.id),
+        broker: BrokerKind::KrakenFutures,
+        broker_order_id: None,
+        instrument: Instrument {
+            symbol: signal.instrument_symbol.clone(),
+            broker: BrokerKind::KrakenFutures,
+            asset_class: AssetClass::CryptoPerp,
+            // PI contracts are integer-quantity; tick size is 0.5 USD on
+            // PI_XBTUSD as of 2026. These are set here as hints and are
+            // not used by the submit path (Kraken enforces them server-side).
+            min_order_size: Decimal::ONE,
+            tick_size: Decimal::new(5, 1),
+        },
+        side: signal.side,
+        order_type: OrderType::PostOnly,
+        time_in_force: TimeInForce::Gtc,
+        quantity: quantity_contracts,
+        limit_price: Some(limit_price),
+        stop_price: None,
+        status: OrderStatus::PendingSubmission,
+        filled_quantity: Decimal::ZERO,
+        avg_fill_price: None,
+        fees_paid: Decimal::ZERO,
+        created_at: now,
+        updated_at: now,
+        error_message: None,
+    })
+}
+
+fn order_status_to_string(status: OrderStatus) -> String {
+    match status {
+        OrderStatus::PendingSubmission => "pending_submission",
+        OrderStatus::Submitted => "submitted",
+        OrderStatus::Acknowledged => "acknowledged",
+        OrderStatus::PartiallyFilled => "partially_filled",
+        OrderStatus::Filled => "filled",
+        OrderStatus::Cancelled => "cancelled",
+        OrderStatus::Rejected => "rejected",
+        OrderStatus::Failed => "failed",
+    }
+    .to_string()
+}
+
+/// Classify a broker error into a stable machine-readable kind for the
+/// rejection_reason JSON. Keeps the SQL filter surface small and stable.
+fn broker_error_kind(err: &ExecutionError) -> &'static str {
+    match err {
+        ExecutionError::Rejected(_) => "broker_rejected",
+        ExecutionError::InvalidResponse(_) => "broker_invalid_response",
+        ExecutionError::Network(_) => "broker_network",
+        ExecutionError::Timeout { .. } => "broker_timeout",
+        ExecutionError::RateLimited { .. } => "broker_rate_limited",
+        ExecutionError::Authentication(_) => "broker_authentication",
+        ExecutionError::InsufficientMargin(_) => "broker_insufficient_margin",
+        ExecutionError::Unsupported(_) => "broker_unsupported",
     }
 }
 

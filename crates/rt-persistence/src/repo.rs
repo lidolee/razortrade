@@ -230,6 +230,105 @@ impl Database {
         Ok(result.last_insert_rowid())
     }
 
+    // ---------------------------------------------------------------
+    // Order lifecycle (used by Paper/Live execution path)
+    // ---------------------------------------------------------------
+
+    /// Insert a new order in the `pending_submission` state. Returns the
+    /// auto-generated local order id. The broker has not been contacted yet.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_pending_order(
+        &self,
+        signal_id: Option<i64>,
+        broker: &str,
+        instrument_symbol: &str,
+        side: &str,
+        order_type: &str,
+        time_in_force: &str,
+        quantity: &str,
+        limit_price: Option<&str>,
+        stop_price: Option<&str>,
+        created_at_iso: &str,
+    ) -> Result<i64> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO orders
+                (signal_id, broker, instrument_symbol, side,
+                 order_type, time_in_force, quantity,
+                 limit_price, stop_price, status,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_submission', ?, ?)
+            "#,
+        )
+        .bind(signal_id)
+        .bind(broker)
+        .bind(instrument_symbol)
+        .bind(side)
+        .bind(order_type)
+        .bind(time_in_force)
+        .bind(quantity)
+        .bind(limit_price)
+        .bind(stop_price)
+        .bind(created_at_iso)
+        .bind(created_at_iso)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.last_insert_rowid())
+    }
+
+    /// Update an order after the broker accepted it. Sets broker_order_id
+    /// and the post-submission status returned by the broker.
+    pub async fn mark_order_submitted(
+        &self,
+        order_id: i64,
+        broker_order_id: &str,
+        status: &str,
+        updated_at_iso: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE orders
+               SET broker_order_id = ?,
+                   status = ?,
+                   updated_at = ?
+             WHERE id = ?
+            "#,
+        )
+        .bind(broker_order_id)
+        .bind(status)
+        .bind(updated_at_iso)
+        .bind(order_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Mark an order as failed (broker call errored out before an id was
+    /// received). The broker-side state is unknown; reconciliation is
+    /// required before any new submission on the same instrument.
+    pub async fn mark_order_failed(
+        &self,
+        order_id: i64,
+        error_message: &str,
+        updated_at_iso: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE orders
+               SET status = 'failed',
+                   error_message = ?,
+                   updated_at = ?
+             WHERE id = ?
+            "#,
+        )
+        .bind(error_message)
+        .bind(updated_at_iso)
+        .bind(order_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Fetch the most recent equity snapshot, or `None` if none exist yet.
     pub async fn latest_equity_snapshot(&self) -> Result<Option<EquitySnapshotRow>> {
         let row = sqlx::query_as::<_, EquitySnapshotRow>(

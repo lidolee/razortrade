@@ -22,6 +22,9 @@ mod portfolio_loader;
 mod signal_processor;
 
 use anyhow::{Context, Result};
+use rt_core::execution_mode::ExecutionMode;
+use rt_execution::Broker;
+use rt_kraken_futures::rest::KrakenFuturesRestClient;
 use rt_kraken_futures::ws::{KrakenFuturesWsClient, WsConfig};
 use rt_kraken_futures::Credentials;
 use rt_persistence::Database;
@@ -202,12 +205,49 @@ async fn main() -> Result<()> {
         description = execution_mode.description(),
         "execution mode configured"
     );
+
+    // Broker for CryptoLeverage sleeve (Kraken Futures).
+    //
+    // DryRun: no broker. Paper: demo endpoint. Live: production endpoint.
+    // For Paper/Live we require API credentials and we do a cheap
+    // health_check() at startup. If either fails we refuse to start,
+    // because silent fallback to a different endpoint would be a
+    // correctness nightmare (demo funds != production funds).
+    let crypto_leverage_broker: Option<Arc<dyn Broker>> = match execution_mode {
+        ExecutionMode::DryRun => None,
+        ExecutionMode::Paper | ExecutionMode::Live => {
+            let creds = Credentials::from_env().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "execution mode is {:?} but RT_KRAKEN_API_KEY/RT_KRAKEN_API_SECRET \
+                     are not set in the environment; refusing to start",
+                    execution_mode
+                )
+            })?;
+            let client: Arc<dyn Broker> = if matches!(execution_mode, ExecutionMode::Paper) {
+                Arc::new(KrakenFuturesRestClient::demo(Some(creds)))
+            } else {
+                Arc::new(KrakenFuturesRestClient::production(Some(creds)))
+            };
+            info!(
+                mode = ?execution_mode,
+                "broker client constructed, running health check…"
+            );
+            client
+                .health_check()
+                .await
+                .context("kraken futures broker health check failed at startup")?;
+            info!("broker health check passed");
+            Some(client)
+        }
+    };
+
     let processor = Arc::new(SignalProcessor::new(
         db.clone(),
         checklist.clone(),
         risk_config.clone(),
         market_data.clone(),
         execution_mode,
+        crypto_leverage_broker,
     ));
 
     // ---- Shutdown plumbing --------------------------------------------
