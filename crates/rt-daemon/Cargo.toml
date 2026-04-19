@@ -47,6 +47,17 @@ assets = [
     { source = "../../packaging/rt-daemon.service", dest = "/usr/lib/systemd/system/rt-daemon.service", mode = "0644" },
     { source = "../../packaging/daemon.toml", dest = "/etc/razortrade/daemon.toml", mode = "0640", user = "root", group = "razortrade", config = true, config_noreplace = true },
     { source = "../../packaging/README.md", dest = "/usr/share/doc/razortrade/README.md", mode = "0644", doc = true },
+    # --- Drop 13: Donchian signal generator --------------------------------
+    # Python helper scripts + systemd timer. stdlib-only, so no pip deps.
+    # The scripts share the rt-daemon RPM rather than being split off into
+    # a separate package because the coupling is hard: they write into the
+    # daemon's SQLite database using schemas shipped with the daemon
+    # migrations. Separating would mean version skew could silently break
+    # signal generation.
+    { source = "../../tools/donchian_signal.py", dest = "/usr/libexec/razortrade/donchian_signal.py", mode = "0755" },
+    { source = "../../tools/indicators.py", dest = "/usr/libexec/razortrade/indicators.py", mode = "0644" },
+    { source = "../../packaging/razortrade-signals.service", dest = "/usr/lib/systemd/system/razortrade-signals.service", mode = "0644" },
+    { source = "../../packaging/razortrade-signals.timer", dest = "/usr/lib/systemd/system/razortrade-signals.timer", mode = "0644" },
 ]
 
 pre_install_script = '''
@@ -59,14 +70,16 @@ exit 0
 
 post_install_script = '''
 systemctl daemon-reload >/dev/null 2>&1 || :
-# Deliberately do NOT enable or start the service. Operator must
-# provision credentials first, then:
+# Deliberately do NOT enable or start the daemon or timer. Operator
+# must provision credentials first, then:
 #   systemctl enable --now rt-daemon.service
+#   systemctl enable --now razortrade-signals.timer
 exit 0
 '''
 
 pre_uninstall_script = '''
 if [ "$1" = "0" ]; then
+    systemctl --no-reload disable --now razortrade-signals.timer >/dev/null 2>&1 || :
     systemctl --no-reload disable --now rt-daemon.service >/dev/null 2>&1 || :
 fi
 exit 0

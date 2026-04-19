@@ -1,0 +1,36 @@
+# razortrade Donchian signal timer — fires every 4 hours
+#
+# Cadence rationale: the strategy uses 4h Donchian candles, so the
+# natural evaluation frequency is once per candle close. Candles close
+# on 4h UTC boundaries (00/04/08/12/16/20). We schedule on those exact
+# boundaries plus a randomised jitter so we don't hammer Kraken at
+# :00:00 sharp alongside every other bot.
+#
+# Persistent=true ensures that if the host was offline at a scheduled
+# time (reboot, network outage, maintenance window) the timer fires
+# the backlog tick when the host returns — important for not missing a
+# breakout evaluation.
+
+[Unit]
+Description=Run razortrade Donchian signal generator every 4 hours
+Documentation=file:/usr/share/doc/razortrade/README.md
+Requires=razortrade-signals.service
+
+[Timer]
+# Every 4h: 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC.
+# OnCalendar takes systemd calendar syntax, NOT cron.
+OnCalendar=*-*-* 00/4:00:00
+
+# Randomised delay up to 2 minutes. Spreads load and survives the
+# "every bot fires at :00:00" thundering herd at Kraken.
+RandomizedDelaySec=120
+
+# If we miss a scheduled fire because the host was down, run it on
+# next boot instead of silently skipping. Keeps the signal history
+# gap-free in the expected case.
+Persistent=true
+
+Unit=razortrade-signals.service
+
+[Install]
+WantedBy=timers.target
