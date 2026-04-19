@@ -5,8 +5,8 @@
 //! not speculatively.
 
 use crate::models::{
-    CapitalFlowRow, EquitySnapshotRow, KillSwitchEventRow, OrderFillOutcome, PositionRow,
-    SignalRow,
+    CapitalFlowRow, EquitySnapshotRow, KillSwitchEventRow, OrderFillOutcome, PositionFillOutcome,
+    PositionRow, PositionTransition, SignalRow,
 };
 use crate::Result;
 use rust_decimal::Decimal;
@@ -345,6 +345,10 @@ impl Database {
     ///   and a conservative `updated_at` timestamp in a single
     ///   transaction.
     ///
+    /// The outcome also carries the order's side, broker, instrument
+    /// and sleeve attribution (via join on `signals`) so the caller
+    /// can key position-table updates without a second query.
+    ///
     /// Weighted average price formula:
     ///   new_avg = (old_filled * old_avg + fill_qty * fill_price) / new_filled
     /// with the special case `old_filled == 0 -> new_avg = fill_price`.
@@ -362,25 +366,70 @@ impl Database {
     ) -> Result<Option<OrderFillOutcome>> {
         let mut tx = self.pool.begin().await?;
 
-        let row: Option<(i64, String, String, Option<String>, String, String)> = sqlx::query_as(
+        // Left-join on signals so we can pull sleeve in the same query.
+        // Sleeve is optional because historical orders (pre-signal-table
+        // reform) may not have a signal_id.
+        let row: Option<(
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+        )> = sqlx::query_as(
             r#"
-            SELECT id, quantity, filled_quantity, avg_fill_price, fees_paid, status
-              FROM orders
-             WHERE broker_order_id = ?
+            SELECT o.id,
+                   o.broker,
+                   o.instrument_symbol,
+                   o.side,
+                   o.quantity,
+                   o.filled_quantity,
+                   o.avg_fill_price,
+                   o.fees_paid,
+                   o.status,
+                   s.sleeve
+              FROM orders o
+              LEFT JOIN signals s ON s.id = o.signal_id
+             WHERE o.broker_order_id = ?
             "#,
         )
         .bind(broker_order_id)
         .fetch_optional(&mut *tx)
         .await?;
 
-        let (order_id, quantity_str, old_filled_str, old_avg_opt, old_fees_str, old_status) =
-            match row {
-                Some(r) => r,
-                None => {
-                    tx.commit().await?;
-                    return Ok(None);
-                }
-            };
+        let (
+            order_id,
+            broker,
+            instrument_symbol,
+            side_str,
+            quantity_str,
+            old_filled_str,
+            old_avg_opt,
+            old_fees_str,
+            old_status,
+            sleeve,
+        ) = match row {
+            Some(r) => r,
+            None => {
+                tx.commit().await?;
+                return Ok(None);
+            }
+        };
+
+        let is_buy = match side_str.as_str() {
+            "buy" => true,
+            "sell" => false,
+            other => {
+                return Err(crate::PersistenceError::InvalidEnum {
+                    column: "orders.side",
+                    value: other.to_string(),
+                });
+            }
+        };
 
         let quantity = Decimal::from_str(&quantity_str).map_err(|e| {
             crate::PersistenceError::Decimal(format!("orders.quantity: {e}"))
@@ -438,12 +487,297 @@ impl Database {
 
         Ok(Some(OrderFillOutcome {
             order_id,
+            sleeve,
+            broker,
+            instrument_symbol,
+            is_buy,
             new_filled_quantity: new_filled,
             new_avg_fill_price: new_avg,
             new_fees_paid: new_fees,
             new_status,
             is_fully_filled,
         }))
+    }
+
+    /// Apply a fill to the positions table for inverse-contract
+    /// instruments. Sign convention: `quantity` in `positions` is
+    /// signed (positive=long, negative=short, zero=flat).
+    ///
+    /// State transitions handled:
+    /// - **Opened**: no open row for this (instrument, broker) tuple.
+    ///   Insert a new row with `quantity = ± fill_qty`, entry = fill_price.
+    /// - **Added**: existing same-side position; update quantity and
+    ///   quantity-weighted entry.
+    /// - **Reduced**: opposite-side fill smaller than current |quantity|.
+    ///   Keep entry, reduce quantity, realise PnL for the closed part.
+    /// - **Closed**: opposite-side fill exactly equal to |quantity|.
+    ///   Stamp `closed_at` and set quantity to zero. Realise full PnL.
+    /// - **Flipped**: opposite-side fill larger than |quantity|.
+    ///   Close the old row (stamp closed_at, realise PnL on the closed
+    ///   qty), then open a *new* row for the residual in the opposite
+    ///   direction, entry = fill_price.
+    ///
+    /// Inverse-contract PnL formula (BTC, for PI_XBTUSD and friends):
+    ///     pnl_btc = closed_contracts * (1/entry_price - 1/exit_price)
+    /// where `closed_contracts` is signed: positive for a long being
+    /// closed, negative for a short being closed. The sign propagates
+    /// naturally so a winning long and a winning short both produce
+    /// positive pnl_btc.
+    pub async fn apply_fill_to_position(
+        &self,
+        instrument_symbol: &str,
+        broker: &str,
+        sleeve: &str,
+        is_buy: bool,
+        fill_qty: Decimal,
+        fill_price: Decimal,
+        now_iso: &str,
+    ) -> Result<PositionFillOutcome> {
+        // Signed fill delta: Buy => +qty, Sell => -qty.
+        let fill_signed = if is_buy { fill_qty } else { -fill_qty };
+
+        let mut tx = self.pool.begin().await?;
+
+        // Find the currently-open position for this (instrument, broker).
+        // Sleeve is not a key — a position belongs to whichever sleeve
+        // opened it — but we record sleeve on insert for attribution.
+        // We also pull realized_pnl_btc in the same query so we don't
+        // need a second round-trip to accumulate it.
+        let existing: Option<(i64, String, String, String, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT id, quantity, avg_entry_price, sleeve, realized_pnl_btc
+              FROM positions
+             WHERE instrument_symbol = ?
+               AND broker = ?
+               AND closed_at IS NULL
+             ORDER BY id DESC
+             LIMIT 1
+            "#,
+        )
+        .bind(instrument_symbol)
+        .bind(broker)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let outcome = match existing {
+            None => {
+                // Opened
+                let id: i64 = sqlx::query_scalar(
+                    r#"
+                    INSERT INTO positions (
+                        instrument_symbol, broker, sleeve,
+                        quantity, avg_entry_price, leverage, liquidation_price,
+                        opened_at, updated_at, closed_at,
+                        realized_pnl_chf, realized_pnl_btc
+                    ) VALUES (?, ?, ?, ?, ?, '1', NULL, ?, ?, NULL, NULL, '0')
+                    RETURNING id
+                    "#,
+                )
+                .bind(instrument_symbol)
+                .bind(broker)
+                .bind(sleeve)
+                .bind(fill_signed.to_string())
+                .bind(fill_price.to_string())
+                .bind(now_iso)
+                .bind(now_iso)
+                .fetch_one(&mut *tx)
+                .await?;
+
+                PositionFillOutcome {
+                    position_id: id,
+                    new_quantity: fill_signed,
+                    new_avg_entry_price: Some(fill_price),
+                    realized_pnl_btc: Decimal::ZERO,
+                    transition: PositionTransition::Opened,
+                }
+            }
+            Some((pos_id, old_qty_str, old_entry_str, _pos_sleeve, old_realized_btc_opt)) => {
+                let old_qty = Decimal::from_str(&old_qty_str).map_err(|e| {
+                    crate::PersistenceError::Decimal(format!("positions.quantity: {e}"))
+                })?;
+                let old_entry = Decimal::from_str(&old_entry_str).map_err(|e| {
+                    crate::PersistenceError::Decimal(format!(
+                        "positions.avg_entry_price: {e}"
+                    ))
+                })?;
+                let old_realized_btc = match old_realized_btc_opt {
+                    Some(s) if !s.is_empty() => Decimal::from_str(&s).map_err(|e| {
+                        crate::PersistenceError::Decimal(format!(
+                            "positions.realized_pnl_btc: {e}"
+                        ))
+                    })?,
+                    _ => Decimal::ZERO,
+                };
+
+                let same_side = (old_qty.is_sign_positive() && is_buy)
+                    || (old_qty.is_sign_negative() && !is_buy);
+
+                if same_side {
+                    // Added: weighted-avg entry update, qty += fill_signed.
+                    let abs_old = old_qty.abs();
+                    let new_qty = old_qty + fill_signed;
+                    let new_abs = new_qty.abs();
+                    let new_entry = ((abs_old * old_entry) + (fill_qty * fill_price)) / new_abs;
+
+                    sqlx::query(
+                        r#"
+                        UPDATE positions
+                           SET quantity = ?,
+                               avg_entry_price = ?,
+                               updated_at = ?
+                         WHERE id = ?
+                        "#,
+                    )
+                    .bind(new_qty.to_string())
+                    .bind(new_entry.to_string())
+                    .bind(now_iso)
+                    .bind(pos_id)
+                    .execute(&mut *tx)
+                    .await?;
+
+                    PositionFillOutcome {
+                        position_id: pos_id,
+                        new_quantity: new_qty,
+                        new_avg_entry_price: Some(new_entry),
+                        realized_pnl_btc: Decimal::ZERO,
+                        transition: PositionTransition::Added,
+                    }
+                } else {
+                    // Opposite side: reduce, close, or flip.
+                    let abs_old = old_qty.abs();
+                    let pnl_per_contract = inverse_pnl_per_contract(old_entry, fill_price);
+
+                    if fill_qty < abs_old {
+                        // Reduced. Closed portion = fill_qty contracts,
+                        // sign matches old position.
+                        let closed_signed = if old_qty.is_sign_positive() {
+                            fill_qty
+                        } else {
+                            -fill_qty
+                        };
+                        let realized = closed_signed * pnl_per_contract;
+
+                        let new_qty = old_qty + fill_signed;
+                        
+
+                        let new_realized_btc = old_realized_btc + realized;
+
+                        sqlx::query(
+                            r#"
+                            UPDATE positions
+                               SET quantity = ?,
+                                   realized_pnl_btc = ?,
+                                   updated_at = ?
+                             WHERE id = ?
+                            "#,
+                        )
+                        .bind(new_qty.to_string())
+                        .bind(new_realized_btc.to_string())
+                        .bind(now_iso)
+                        .bind(pos_id)
+                        .execute(&mut *tx)
+                        .await?;
+
+                        PositionFillOutcome {
+                            position_id: pos_id,
+                            new_quantity: new_qty,
+                            new_avg_entry_price: Some(old_entry),
+                            realized_pnl_btc: realized,
+                            transition: PositionTransition::Reduced,
+                        }
+                    } else if fill_qty == abs_old {
+                        // Closed exactly.
+                        let realized = old_qty * pnl_per_contract;
+                        
+
+                        let new_realized_btc = old_realized_btc + realized;
+
+                        sqlx::query(
+                            r#"
+                            UPDATE positions
+                               SET quantity = '0',
+                                   closed_at = ?,
+                                   updated_at = ?,
+                                   realized_pnl_btc = ?
+                             WHERE id = ?
+                            "#,
+                        )
+                        .bind(now_iso)
+                        .bind(now_iso)
+                        .bind(new_realized_btc.to_string())
+                        .bind(pos_id)
+                        .execute(&mut *tx)
+                        .await?;
+
+                        PositionFillOutcome {
+                            position_id: pos_id,
+                            new_quantity: Decimal::ZERO,
+                            new_avg_entry_price: None,
+                            realized_pnl_btc: realized,
+                            transition: PositionTransition::Closed,
+                        }
+                    } else {
+                        // Flipped: close old, open new for residual.
+                        let realized = old_qty * pnl_per_contract;
+                        
+
+                        let new_realized_btc = old_realized_btc + realized;
+
+                        sqlx::query(
+                            r#"
+                            UPDATE positions
+                               SET quantity = '0',
+                                   closed_at = ?,
+                                   updated_at = ?,
+                                   realized_pnl_btc = ?
+                             WHERE id = ?
+                            "#,
+                        )
+                        .bind(now_iso)
+                        .bind(now_iso)
+                        .bind(new_realized_btc.to_string())
+                        .bind(pos_id)
+                        .execute(&mut *tx)
+                        .await?;
+
+                        let residual_qty = fill_qty - abs_old;
+                        let residual_signed = if is_buy { residual_qty } else { -residual_qty };
+
+                        let new_id: i64 = sqlx::query_scalar(
+                            r#"
+                            INSERT INTO positions (
+                                instrument_symbol, broker, sleeve,
+                                quantity, avg_entry_price, leverage, liquidation_price,
+                                opened_at, updated_at, closed_at,
+                                realized_pnl_chf, realized_pnl_btc
+                            ) VALUES (?, ?, ?, ?, ?, '1', NULL, ?, ?, NULL, NULL, '0')
+                            RETURNING id
+                            "#,
+                        )
+                        .bind(instrument_symbol)
+                        .bind(broker)
+                        .bind(sleeve)
+                        .bind(residual_signed.to_string())
+                        .bind(fill_price.to_string())
+                        .bind(now_iso)
+                        .bind(now_iso)
+                        .fetch_one(&mut *tx)
+                        .await?;
+
+                        PositionFillOutcome {
+                            position_id: new_id,
+                            new_quantity: residual_signed,
+                            new_avg_entry_price: Some(fill_price),
+                            realized_pnl_btc: realized,
+                            transition: PositionTransition::Flipped,
+                        }
+                    }
+                }
+            }
+        };
+
+        tx.commit().await?;
+        Ok(outcome)
     }
 
     /// Fetch the most recent equity snapshot, or `None` if none exist yet.
@@ -570,4 +904,27 @@ impl Database {
         )
         .await
     }
+}
+
+// ---------------------------------------------------------------------
+// Helpers for apply_fill_to_position
+// ---------------------------------------------------------------------
+
+/// PnL per contract for an inverse-perpetual close, expressed in the
+/// settlement currency (BTC for PI_XBTUSD). The sign is derived from
+/// the *signed* closed-contract count at the call site, so this
+/// function returns the per-contract scalar only.
+///
+///   pnl_per_contract = 1/entry - 1/exit
+///
+/// For a long being closed (signed closed_contracts > 0):
+///   - exit > entry  -> pnl_per_contract > 0 scaled by +N -> profit
+///   - exit < entry  -> pnl_per_contract < 0 scaled by +N -> loss
+///
+/// For a short being closed (signed closed_contracts < 0):
+///   - exit > entry  -> pnl_per_contract > 0 scaled by -N -> loss
+///   - exit < entry  -> pnl_per_contract < 0 scaled by -N -> profit
+fn inverse_pnl_per_contract(entry: Decimal, exit: Decimal) -> Decimal {
+    let one = Decimal::ONE;
+    (one / entry) - (one / exit)
 }

@@ -58,6 +58,7 @@ pub struct PositionRow {
     pub updated_at: String,
     pub closed_at: Option<String>,
     pub realized_pnl_chf: Option<String>,
+    pub realized_pnl_btc: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -105,12 +106,24 @@ pub struct KillSwitchEventRow {
 /// Result of applying a single fill to a tracked order.
 ///
 /// Returned by `Database::apply_fill_to_order` so callers can log the
-/// post-update state and drive any downstream side effects (position
-/// table updates will hook in here in Drop 6b).
+/// post-update state and drive downstream side effects (the position
+/// reconciler in Drop 6b uses `sleeve` and `is_buy` to attribute and
+/// sign the fill when updating the positions table).
 #[derive(Debug, Clone)]
 pub struct OrderFillOutcome {
     /// Primary key of the local `orders` row that was updated.
     pub order_id: i64,
+    /// Sleeve attribution from the originating signal, if any.
+    /// `None` only for orders inserted without a signal_id (should not
+    /// happen in the current pipeline but we degrade gracefully).
+    pub sleeve: Option<String>,
+    /// Broker identifier from the originating order row. Used to key
+    /// positions by broker + instrument.
+    pub broker: String,
+    /// Instrument symbol from the orders row (e.g. "PI_XBTUSD").
+    pub instrument_symbol: String,
+    /// True if the original order was a Buy (long-direction fill).
+    pub is_buy: bool,
     /// Sum of all fills applied to this order so far (cumulative).
     pub new_filled_quantity: rust_decimal::Decimal,
     /// Quantity-weighted average fill price across all fills.
@@ -123,4 +136,45 @@ pub struct OrderFillOutcome {
     pub new_status: String,
     /// Whether this fill fully completed the order.
     pub is_fully_filled: bool,
+}
+
+/// State change applied to the open position for an instrument when a
+/// fill is processed. Returned by `Database::apply_fill_to_position`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionTransition {
+    /// No open position existed; a new row was inserted.
+    Opened,
+    /// Existing position on the same side; size increased and the
+    /// average entry price was updated (quantity-weighted).
+    Added,
+    /// Existing position on the opposite side; size decreased. Entry
+    /// price is unchanged. A realised PnL contribution is recorded.
+    Reduced,
+    /// Fill exactly closed the existing position. `closed_at` is now
+    /// set and `quantity` is zero.
+    Closed,
+    /// Fill exceeded the existing opposite-side position: the old
+    /// position was closed and a new one in the opposite direction
+    /// was opened for the residual quantity. Realised PnL is recorded
+    /// on the closed portion only.
+    Flipped,
+}
+
+/// Result of applying a fill to the positions table.
+#[derive(Debug, Clone)]
+pub struct PositionFillOutcome {
+    /// PK of the row that was inserted or updated. For a Flipped
+    /// transition, this is the new (residual) position row.
+    pub position_id: i64,
+    /// New signed quantity after this fill (positive = long,
+    /// negative = short, zero = flat).
+    pub new_quantity: rust_decimal::Decimal,
+    /// Entry price of the surviving position. `None` iff `Closed`.
+    pub new_avg_entry_price: Option<rust_decimal::Decimal>,
+    /// PnL realised *by this fill* in the contract's settlement
+    /// currency (BTC for inverse perpetuals like PI_XBTUSD).
+    /// Zero for Opened and Added transitions.
+    pub realized_pnl_btc: rust_decimal::Decimal,
+    /// The kind of change that was applied.
+    pub transition: PositionTransition,
 }

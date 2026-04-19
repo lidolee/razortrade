@@ -135,6 +135,58 @@ async fn reconcile_once(
                     fully_filled = outcome.is_fully_filled,
                     "fill applied to order"
                 );
+
+                // Drop 6b: also reconcile into the positions table.
+                // Skip only if the order had no originating signal
+                // (so we have no sleeve attribution) — we warn once
+                // rather than silently dropping.
+                let sleeve = match &outcome.sleeve {
+                    Some(s) => s.clone(),
+                    None => {
+                        warn!(
+                            order_id = outcome.order_id,
+                            broker_order_id = %fill.order_id,
+                            "fill applied to order but sleeve is unknown; position not updated"
+                        );
+                        *last_applied_seq = (*last_applied_seq).max(fill.seq);
+                        continue;
+                    }
+                };
+
+                match db
+                    .apply_fill_to_position(
+                        &outcome.instrument_symbol,
+                        &outcome.broker,
+                        &sleeve,
+                        outcome.is_buy,
+                        fill.qty,
+                        fill.price,
+                        &now_iso,
+                    )
+                    .await
+                {
+                    Ok(pos_outcome) => {
+                        info!(
+                            position_id = pos_outcome.position_id,
+                            instrument = %outcome.instrument_symbol,
+                            sleeve = %sleeve,
+                            new_quantity = %pos_outcome.new_quantity,
+                            new_avg_entry_price = ?pos_outcome.new_avg_entry_price,
+                            realized_pnl_btc = %pos_outcome.realized_pnl_btc,
+                            transition = ?pos_outcome.transition,
+                            "fill applied to position"
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            broker_order_id = %fill.order_id,
+                            fill_id = %fill.fill_id,
+                            error = %e,
+                            "order was updated but position update failed; will retry next tick"
+                        );
+                        return Err(Box::new(e));
+                    }
+                }
             }
             Ok(None) => {
                 warn!(
