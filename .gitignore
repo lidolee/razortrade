@@ -35,3 +35,15 @@ daemon.toml.local
 __pycache__/
 *.pyc
 *.pyo
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# SQLite backups from production (Drop 14)
+# Server retention 7d, local unbounded. See backups/README.md
+backups/*.sqlite
+backups/*.sqlite-journal
+backups/*.sqlite-wal
+backups/*.sqlite-shm

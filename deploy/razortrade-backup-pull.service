@@ -1,0 +1,32 @@
+# razortrade backup PULL — systemd user service (ThinkStation side)
+#
+# TEMPLATE — copy to ~/.config/systemd/user/razortrade-backup-pull.service
+# and edit the ExecStart path if your repo isn't at ~/Workspace/razortrade.
+#
+# Install:
+#     mkdir -p ~/.config/systemd/user
+#     cp deploy/razortrade-backup-pull.service ~/.config/systemd/user/
+#     cp deploy/razortrade-backup-pull.timer   ~/.config/systemd/user/
+#     systemctl --user daemon-reload
+#     systemctl --user enable --now razortrade-backup-pull.timer
+#
+# Verify:
+#     systemctl --user list-timers razortrade-backup-pull.timer
+#     systemctl --user start razortrade-backup-pull.service  # run now
+#     journalctl --user -u razortrade-backup-pull.service
+
+[Unit]
+Description=Pull razortrade SQLite backups from production server
+Documentation=https://github.com/lidolee/razortrade
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/Workspace/razortrade/tools/pull-backups-from-prod.sh
+
+# %h expands to the user's home directory at runtime — no need to
+# hardcode /home/linda/. Lets the same file work on both the
+# ThinkStation and the travel laptop.
+
+StandardOutput=journal
+StandardError=journal

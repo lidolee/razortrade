@@ -1,0 +1,32 @@
+# razortrade daily backup timer — 03:00 Europe/Zurich
+#
+# 03:00 local is deliberately a low-activity window: crypto markets
+# are quiet (no US equity open or Asian PMI releases), and the
+# razortrade strategy does not trade at this hour anyway (4h-candle
+# boundaries are 00/04/08/12/16/20 UTC = 01/05/09/13/17/21 CET in
+# winter).
+#
+# Persistent=true: if the host was offline at 03:00 (reboot, power
+# outage, maintenance), the backup fires when the host returns. At
+# worst we skip at most one day's backup between reboots.
+
+[Unit]
+Description=Daily SQLite backup for razortrade
+Documentation=file:/usr/share/doc/razortrade/README.md
+Requires=razortrade-backup.service
+
+[Timer]
+# systemd-calendar: daily at 03:00 local time.
+OnCalendar=*-*-* 03:00:00
+
+# Randomise by up to 15 minutes so that a fleet of razortrade hosts
+# (hypothetical future) doesn't hit the same disk at the same second.
+# For a single host it only shifts the actual run time by a few
+# minutes — harmless.
+RandomizedDelaySec=900
+
+Persistent=true
+Unit=razortrade-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -58,6 +58,13 @@ assets = [
     { source = "../../tools/indicators.py", dest = "/usr/libexec/razortrade/indicators.py", mode = "0644" },
     { source = "../../packaging/razortrade-signals.service", dest = "/usr/lib/systemd/system/razortrade-signals.service", mode = "0644" },
     { source = "../../packaging/razortrade-signals.timer", dest = "/usr/lib/systemd/system/razortrade-signals.timer", mode = "0644" },
+    # --- Drop 14: SQLite backup --------------------------------------------
+    # Daily snapshot via sqlite3 .backup (online-safe). Rotates local
+    # copies at 7 days. ThinkStation pulls separately — see
+    # deploy/razortrade-backup-pull.*.
+    { source = "../../tools/sqlite-backup.sh", dest = "/usr/libexec/razortrade/sqlite-backup.sh", mode = "0755" },
+    { source = "../../packaging/razortrade-backup.service", dest = "/usr/lib/systemd/system/razortrade-backup.service", mode = "0644" },
+    { source = "../../packaging/razortrade-backup.timer", dest = "/usr/lib/systemd/system/razortrade-backup.timer", mode = "0644" },
 ]
 
 pre_install_script = '''
@@ -70,15 +77,17 @@ exit 0
 
 post_install_script = '''
 systemctl daemon-reload >/dev/null 2>&1 || :
-# Deliberately do NOT enable or start the daemon or timer. Operator
+# Deliberately do NOT enable or start the daemon or timers. Operator
 # must provision credentials first, then:
 #   systemctl enable --now rt-daemon.service
 #   systemctl enable --now razortrade-signals.timer
+#   systemctl enable --now razortrade-backup.timer
 exit 0
 '''
 
 pre_uninstall_script = '''
 if [ "$1" = "0" ]; then
+    systemctl --no-reload disable --now razortrade-backup.timer >/dev/null 2>&1 || :
     systemctl --no-reload disable --now razortrade-signals.timer >/dev/null 2>&1 || :
     systemctl --no-reload disable --now rt-daemon.service >/dev/null 2>&1 || :
 fi

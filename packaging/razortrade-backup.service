@@ -1,0 +1,48 @@
+# razortrade SQLite backup — oneshot, daily
+#
+# Runs as the razortrade user (same as the daemon) so it can read the
+# live DB and write into /var/lib/razortrade/backups. Uses sqlite3's
+# .backup command which is online-safe — no need to stop the daemon.
+#
+# Failure handling: if this one run fails (disk full, DB corrupt,
+# etc.), systemd logs the failure and the next day's timer fires
+# regardless. There is no auto-retry within the day, on purpose:
+# the backup is a best-effort daily artefact, not a guarantee.
+
+[Unit]
+Description=razortrade SQLite daily backup (local)
+Documentation=file:/usr/share/doc/razortrade/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=razortrade
+Group=razortrade
+ExecStart=/usr/libexec/razortrade/sqlite-backup.sh
+
+# --- Hardening ---------------------------------------------------------
+# No network needed — the script only touches the local DB and local
+# filesystem. Tighter than the daemon's profile accordingly.
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/razortrade
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+PrivateDevices=true
+CapabilityBoundingSet=
+PrivateNetwork=true
+
+StandardOutput=journal
+StandardError=journal

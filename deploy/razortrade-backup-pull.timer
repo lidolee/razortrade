@@ -1,0 +1,22 @@
+# razortrade backup PULL — systemd user timer (ThinkStation side)
+#
+# Fires daily at 09:00 local time. Machine not up at 09:00? With
+# Persistent=true, fires at next login (user systemd starts with
+# the session) — which handles the "my workstation was off all
+# weekend" case cleanly.
+#
+# Server-side backup retention is 7 days, so as long as the
+# ThinkStation is online at least once per week, no backup is lost.
+
+[Unit]
+Description=Daily pull of razortrade backups from production
+Requires=razortrade-backup-pull.service
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+RandomizedDelaySec=600
+Persistent=true
+Unit=razortrade-backup-pull.service
+
+[Install]
+WantedBy=timers.target
