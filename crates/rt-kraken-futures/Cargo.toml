@@ -1,0 +1,32 @@
+[package]
+name = "rt-kraken-futures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rt-core = { path = "../rt-core" }
+rt-execution = { path = "../rt-execution" }
+
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+async-trait = "0.1"
+
+reqwest = { workspace = true }
+url = "2.5"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rust_decimal = { workspace = true }
+
+hmac = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+hex = "0.4"

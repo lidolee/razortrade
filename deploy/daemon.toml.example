@@ -1,0 +1,28 @@
+# Example daemon configuration.
+# Install to /etc/razortrade/daemon.toml and adjust.
+
+database_path = "/var/lib/razortrade/razortrade.sqlite"
+signal_poll_interval_ms = 1000
+kill_switch_check_interval_secs = 60
+
+[risk]
+# Check 1: staleness
+max_tick_age_ms = 500
+
+# Check 2: spread & liquidity
+max_spread_bps = "20"
+min_book_depth_multiple = "3"
+book_depth_levels = 5
+
+# Check 3: volatility
+max_atr_pct_for_leverage = "6"
+max_atr_pct_absolute = "15"
+
+# Check 4: hard limits
+leverage_kill_switch_budget_chf = "-1000"
+max_portfolio_drawdown = "0.20"
+adverse_move_for_worst_case = "0.10"
+max_leverage = "2"
+
+# Check 5: funding rate
+max_funding_rate_per_8h = "0.0002"

@@ -1,0 +1,71 @@
+[Unit]
+Description=razortrade trading daemon
+Documentation=file:/opt/razortrade/docs/ARCHITECTURE.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=razortrade
+Group=razortrade
+
+# Executable and config
+ExecStart=/opt/razortrade/bin/rt-daemon
+Environment=RUST_LOG=info,rt_=debug,sqlx=warn
+Environment=RT_DAEMON_CONFIG=/etc/razortrade/daemon.toml
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Graceful shutdown: SIGTERM, wait up to 15s, then SIGKILL
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# Working directory
+WorkingDirectory=/var/lib/razortrade
+StateDirectory=razortrade
+StateDirectoryMode=0750
+LogsDirectory=razortrade
+LogsDirectoryMode=0750
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+
+# Read/write paths
+ReadWritePaths=/var/lib/razortrade /var/log/razortrade
+ReadOnlyPaths=/etc/razortrade
+
+# Resource limits
+LimitNOFILE=4096
+MemoryMax=2G
+TasksMax=256
+
+# Security
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
