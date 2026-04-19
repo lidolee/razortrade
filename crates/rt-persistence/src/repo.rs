@@ -5,9 +5,11 @@
 //! not speculatively.
 
 use crate::models::{
-    CapitalFlowRow, EquitySnapshotRow, KillSwitchEventRow, PositionRow, SignalRow,
+    CapitalFlowRow, EquitySnapshotRow, KillSwitchEventRow, OrderFillOutcome, PositionRow,
+    SignalRow,
 };
 use crate::Result;
+use rust_decimal::Decimal;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
 use sqlx::SqlitePool;
 use std::path::Path;
@@ -327,6 +329,121 @@ impl Database {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Apply a single fill from the broker feed to a tracked order.
+    ///
+    /// Behaviour:
+    /// - Returns `Ok(None)` if no local `orders` row matches the given
+    ///   `broker_order_id`. This happens when fills arrive for orders
+    ///   submitted outside the daemon (e.g. manually via Kraken's web UI
+    ///   during paper testing) and is not an error.
+    /// - Otherwise computes the new cumulative fill state (quantity,
+    ///   quantity-weighted average price, accumulated fees), advances
+    ///   the status monotonically (acknowledged -> partially_filled ->
+    ///   filled; never regresses), and persists both the order update
+    ///   and a conservative `updated_at` timestamp in a single
+    ///   transaction.
+    ///
+    /// Weighted average price formula:
+    ///   new_avg = (old_filled * old_avg + fill_qty * fill_price) / new_filled
+    /// with the special case `old_filled == 0 -> new_avg = fill_price`.
+    ///
+    /// Idempotency is the caller's responsibility: the fill_reconciler
+    /// task uses the `FillsRing::highest_seq()` watermark to ensure the
+    /// same fill is never submitted twice.
+    pub async fn apply_fill_to_order(
+        &self,
+        broker_order_id: &str,
+        fill_qty: Decimal,
+        fill_price: Decimal,
+        fee: Decimal,
+        now_iso: &str,
+    ) -> Result<Option<OrderFillOutcome>> {
+        let mut tx = self.pool.begin().await?;
+
+        let row: Option<(i64, String, String, Option<String>, String, String)> = sqlx::query_as(
+            r#"
+            SELECT id, quantity, filled_quantity, avg_fill_price, fees_paid, status
+              FROM orders
+             WHERE broker_order_id = ?
+            "#,
+        )
+        .bind(broker_order_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let (order_id, quantity_str, old_filled_str, old_avg_opt, old_fees_str, old_status) =
+            match row {
+                Some(r) => r,
+                None => {
+                    tx.commit().await?;
+                    return Ok(None);
+                }
+            };
+
+        let quantity = Decimal::from_str(&quantity_str).map_err(|e| {
+            crate::PersistenceError::Decimal(format!("orders.quantity: {e}"))
+        })?;
+        let old_filled = Decimal::from_str(&old_filled_str).map_err(|e| {
+            crate::PersistenceError::Decimal(format!("orders.filled_quantity: {e}"))
+        })?;
+        let old_fees = Decimal::from_str(&old_fees_str)
+            .map_err(|e| crate::PersistenceError::Decimal(format!("orders.fees_paid: {e}")))?;
+        let old_avg = match old_avg_opt {
+            Some(s) => Some(Decimal::from_str(&s).map_err(|e| {
+                crate::PersistenceError::Decimal(format!("orders.avg_fill_price: {e}"))
+            })?),
+            None => None,
+        };
+
+        let new_filled = old_filled + fill_qty;
+        let new_avg = if old_filled.is_zero() || old_avg.is_none() {
+            fill_price
+        } else {
+            let old_avg = old_avg.unwrap();
+            ((old_filled * old_avg) + (fill_qty * fill_price)) / new_filled
+        };
+        let new_fees = old_fees + fee;
+
+        // Status transition. Monotonic: once 'filled', stays 'filled'.
+        let is_fully_filled = new_filled >= quantity;
+        let new_status = if old_status == "filled" || is_fully_filled {
+            "filled".to_string()
+        } else {
+            "partially_filled".to_string()
+        };
+
+        sqlx::query(
+            r#"
+            UPDATE orders
+               SET filled_quantity = ?,
+                   avg_fill_price = ?,
+                   fees_paid = ?,
+                   status = ?,
+                   updated_at = ?
+             WHERE id = ?
+            "#,
+        )
+        .bind(new_filled.to_string())
+        .bind(new_avg.to_string())
+        .bind(new_fees.to_string())
+        .bind(&new_status)
+        .bind(now_iso)
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(Some(OrderFillOutcome {
+            order_id,
+            new_filled_quantity: new_filled,
+            new_avg_fill_price: new_avg,
+            new_fees_paid: new_fees,
+            new_status,
+            is_fully_filled,
+        }))
     }
 
     /// Fetch the most recent equity snapshot, or `None` if none exist yet.

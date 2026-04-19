@@ -17,6 +17,7 @@
 //! SIGTERM / SIGINT → the watch channel flips → all tasks drain and exit.
 //! systemd sends SIGTERM by default with a 15 s `TimeoutStopSec`.
 
+mod fill_reconciler;
 mod market_data;
 mod portfolio_loader;
 mod signal_processor;
@@ -279,6 +280,17 @@ async fn main() -> Result<()> {
         tokio::spawn(async move { run_kill_switch_supervisor(db, cfg, interval, rx).await })
     };
 
+    let fill_reconciler_handle = {
+        let db = db.clone();
+        let fills = ws_client.fills();
+        let rx = shutdown_rx.clone();
+        // 1 Hz is generous: individual fills on a human-scale swing
+        // strategy are rare, and the cost of an empty tick is a single
+        // read-lock acquisition on FillsStore.
+        let tick = Duration::from_millis(1000);
+        tokio::spawn(async move { fill_reconciler::run(db, fills, tick, rx).await })
+    };
+
     // ---- Wait for shutdown --------------------------------------------
     wait_for_shutdown_signal(shutdown_tx).await;
     info!("shutting down…");
@@ -287,6 +299,7 @@ async fn main() -> Result<()> {
         let _ = ws_handle.await;
         let _ = poller_handle.await;
         let _ = supervisor_handle.await;
+        let _ = fill_reconciler_handle.await;
     })
     .await;
 

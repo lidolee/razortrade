@@ -101,3 +101,26 @@ pub struct KillSwitchEventRow {
     pub resolved_by: Option<String>,
     pub resolved_note: Option<String>,
 }
+
+/// Result of applying a single fill to a tracked order.
+///
+/// Returned by `Database::apply_fill_to_order` so callers can log the
+/// post-update state and drive any downstream side effects (position
+/// table updates will hook in here in Drop 6b).
+#[derive(Debug, Clone)]
+pub struct OrderFillOutcome {
+    /// Primary key of the local `orders` row that was updated.
+    pub order_id: i64,
+    /// Sum of all fills applied to this order so far (cumulative).
+    pub new_filled_quantity: rust_decimal::Decimal,
+    /// Quantity-weighted average fill price across all fills.
+    pub new_avg_fill_price: rust_decimal::Decimal,
+    /// Accumulated fees paid on this order.
+    pub new_fees_paid: rust_decimal::Decimal,
+    /// New textual status, one of: "partially_filled", "filled".
+    /// Status can only progress forward; an order that was already
+    /// "filled" stays "filled" even if a stale smaller fill arrives.
+    pub new_status: String,
+    /// Whether this fill fully completed the order.
+    pub is_fully_filled: bool,
+}
