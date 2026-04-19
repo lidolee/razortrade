@@ -980,3 +980,452 @@ fn inverse_pnl_per_contract(entry: Decimal, exit: Decimal) -> Decimal {
     let one = Decimal::ONE;
     (one / entry) - (one / exit)
 }
+
+// ============================================================
+// Tests
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    /// Build an in-memory database with all migrations applied.
+    /// Each test gets a fresh database — no shared state between
+    /// tests and no ordering dependency.
+    async fn test_db() -> Database {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open in-memory db");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        Database { pool }
+    }
+
+    fn now() -> String {
+        chrono::Utc::now().to_rfc3339()
+    }
+
+    fn d(n: i64) -> Decimal {
+        Decimal::from(n)
+    }
+
+    // ---------- inverse_pnl_per_contract -----------------------
+
+    #[test]
+    fn pnl_is_zero_when_entry_equals_exit() {
+        assert_eq!(inverse_pnl_per_contract(d(50_000), d(50_000)), Decimal::ZERO);
+    }
+
+    #[test]
+    fn pnl_per_contract_is_positive_when_exit_above_entry() {
+        // Per-contract scalar for a closing trade; sign is applied
+        // at the call site via the signed contract count.
+        let pnl = inverse_pnl_per_contract(d(50_000), d(60_000));
+        assert!(pnl > Decimal::ZERO, "got {pnl}");
+    }
+
+    #[test]
+    fn pnl_per_contract_is_negative_when_exit_below_entry() {
+        let pnl = inverse_pnl_per_contract(d(50_000), d(40_000));
+        assert!(pnl < Decimal::ZERO, "got {pnl}");
+    }
+
+    // ---------- apply_fill_to_position: state machine ----------
+
+    #[tokio::test]
+    async fn opens_new_long_from_first_buy_fill() {
+        let db = test_db().await;
+        let out = db
+            .apply_fill_to_position(
+                "PI_XBTUSD",
+                "kraken_futures",
+                "CryptoLeverage",
+                true,
+                d(100),
+                d(50_000),
+                &now(),
+            )
+            .await
+            .expect("apply_fill_to_position");
+
+        assert_eq!(out.transition, PositionTransition::Opened);
+        assert_eq!(out.new_quantity, d(100));
+        assert_eq!(out.new_avg_entry_price, Some(d(50_000)));
+        assert_eq!(out.realized_pnl_btc, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn opens_new_short_from_first_sell_fill() {
+        let db = test_db().await;
+        let out = db
+            .apply_fill_to_position(
+                "PI_XBTUSD",
+                "kraken_futures",
+                "CryptoLeverage",
+                false,
+                d(100),
+                d(50_000),
+                &now(),
+            )
+            .await
+            .expect("apply_fill_to_position");
+
+        assert_eq!(out.transition, PositionTransition::Opened);
+        assert_eq!(out.new_quantity, -d(100));
+        assert_eq!(out.new_avg_entry_price, Some(d(50_000)));
+    }
+
+    #[tokio::test]
+    async fn adds_to_long_with_weighted_average_entry() {
+        let db = test_db().await;
+        // Open long 100 @ 50_000
+        db.apply_fill_to_position(
+            "PI_XBTUSD",
+            "kraken_futures",
+            "CryptoLeverage",
+            true,
+            d(100),
+            d(50_000),
+            &now(),
+        )
+        .await
+        .expect("opened");
+
+        // Add 100 @ 60_000 → weighted avg = (100*50k + 100*60k)/200 = 55k
+        let out = db
+            .apply_fill_to_position(
+                "PI_XBTUSD",
+                "kraken_futures",
+                "CryptoLeverage",
+                true,
+                d(100),
+                d(60_000),
+                &now(),
+            )
+            .await
+            .expect("added");
+
+        assert_eq!(out.transition, PositionTransition::Added);
+        assert_eq!(out.new_quantity, d(200));
+        assert_eq!(out.new_avg_entry_price, Some(d(55_000)));
+        assert_eq!(out.realized_pnl_btc, Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn adds_to_short_with_weighted_average_entry() {
+        let db = test_db().await;
+        // Open short 100 @ 60_000
+        db.apply_fill_to_position(
+            "PI_XBTUSD",
+            "kraken_futures",
+            "CryptoLeverage",
+            false,
+            d(100),
+            d(60_000),
+            &now(),
+        )
+        .await
+        .expect("opened");
+
+        // Add 100 @ 40_000 → avg entry = 50_000, qty = -200
+        let out = db
+            .apply_fill_to_position(
+                "PI_XBTUSD",
+                "kraken_futures",
+                "CryptoLeverage",
+                false,
+                d(100),
+                d(40_000),
+                &now(),
+            )
+            .await
+            .expect("added");
+
+        assert_eq!(out.transition, PositionTransition::Added);
+        assert_eq!(out.new_quantity, -d(200));
+        assert_eq!(out.new_avg_entry_price, Some(d(50_000)));
+    }
+
+    #[tokio::test]
+    async fn reduces_long_and_records_positive_pnl() {
+        let db = test_db().await;
+        db.apply_fill_to_position(
+            "PI_XBTUSD",
+            "kraken_futures",
+            "CryptoLeverage",
+            true,
+            d(200),
+            d(50_000),
+            &now(),
+        )
+        .await
+        .expect("opened");
+
+        // Sell 100 @ 60_000: close half of a long at a profit.
+        let out = db
+            .apply_fill_to_position(
+                "PI_XBTUSD",
+                "kraken_futures",
+                "CryptoLeverage",
+                false,
+                d(100),
+                d(60_000),
+                &now(),
+            )
+            .await
+            .expect("reduced");
+
+        assert_eq!(out.transition, PositionTransition::Reduced);
+        assert_eq!(out.new_quantity, d(100));
+        // Entry price unchanged for the surviving portion.
+        assert_eq!(out.new_avg_entry_price, Some(d(50_000)));
+        assert!(out.realized_pnl_btc > Decimal::ZERO, "got {}", out.realized_pnl_btc);
+    }
+
+    #[tokio::test]
+    async fn reduces_short_and_records_positive_pnl() {
+        let db = test_db().await;
+        db.apply_fill_to_position(
+            "PI_XBTUSD",
+            "kraken_futures",
+            "CryptoLeverage",
+            false,
+            d(200),
+            d(60_000),
+            &now(),
+        )
+        .await
+        .expect("opened");
+
+        // Buy 100 @ 50_000: cover half of a short at a profit.
+        let out = db
+            .apply_fill_to_position(
+                "PI_XBTUSD",
+                "kraken_futures",
+                "CryptoLeverage",
+                true,
+                d(100),
+                d(50_000),
+                &now(),
+            )
+            .await
+            .expect("reduced");
+
+        assert_eq!(out.transition, PositionTransition::Reduced);
+        assert_eq!(out.new_quantity, -d(100));
+        assert_eq!(out.new_avg_entry_price, Some(d(60_000)));
+        assert!(out.realized_pnl_btc > Decimal::ZERO, "got {}", out.realized_pnl_btc);
+    }
+
+    #[tokio::test]
+    async fn closes_long_exactly_at_profit() {
+        let db = test_db().await;
+        db.apply_fill_to_position(
+            "PI_XBTUSD",
+            "kraken_futures",
+            "CryptoLeverage",
+            true,
+            d(100),
+            d(50_000),
+            &now(),
+        )
+        .await
+        .expect("opened");
+
+        let out = db
+            .apply_fill_to_position(
+                "PI_XBTUSD",
+                "kraken_futures",
+                "CryptoLeverage",
+                false,
+                d(100),
+                d(60_000),
+                &now(),
+            )
+            .await
+            .expect("closed");
+
+        assert_eq!(out.transition, PositionTransition::Closed);
+        assert_eq!(out.new_quantity, Decimal::ZERO);
+        assert_eq!(out.new_avg_entry_price, None);
+        assert!(out.realized_pnl_btc > Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn short_closed_at_higher_price_records_loss() {
+        let db = test_db().await;
+        db.apply_fill_to_position(
+            "PI_XBTUSD",
+            "kraken_futures",
+            "CryptoLeverage",
+            false,
+            d(100),
+            d(50_000),
+            &now(),
+        )
+        .await
+        .expect("opened short");
+
+        // Buy to close at a higher price than we shorted — loss.
+        let out = db
+            .apply_fill_to_position(
+                "PI_XBTUSD",
+                "kraken_futures",
+                "CryptoLeverage",
+                true,
+                d(100),
+                d(60_000),
+                &now(),
+            )
+            .await
+            .expect("closed");
+
+        assert_eq!(out.transition, PositionTransition::Closed);
+        assert_eq!(out.new_quantity, Decimal::ZERO);
+        assert!(
+            out.realized_pnl_btc < Decimal::ZERO,
+            "got {}",
+            out.realized_pnl_btc
+        );
+    }
+
+    #[tokio::test]
+    async fn flips_from_long_to_short_with_residual() {
+        let db = test_db().await;
+        db.apply_fill_to_position(
+            "PI_XBTUSD",
+            "kraken_futures",
+            "CryptoLeverage",
+            true,
+            d(100),
+            d(50_000),
+            &now(),
+        )
+        .await
+        .expect("opened long");
+
+        // Sell 150 @ 60_000: closes the 100 long (+PnL), opens
+        // a new short for the residual 50.
+        let out = db
+            .apply_fill_to_position(
+                "PI_XBTUSD",
+                "kraken_futures",
+                "CryptoLeverage",
+                false,
+                d(150),
+                d(60_000),
+                &now(),
+            )
+            .await
+            .expect("flipped");
+
+        assert_eq!(out.transition, PositionTransition::Flipped);
+        assert_eq!(out.new_quantity, -d(50));
+        // The residual short opens at the flip price.
+        assert_eq!(out.new_avg_entry_price, Some(d(60_000)));
+        // PnL is recognised on the closed 100 long portion only.
+        assert!(out.realized_pnl_btc > Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn flips_from_short_to_long_with_residual() {
+        let db = test_db().await;
+        db.apply_fill_to_position(
+            "PI_XBTUSD",
+            "kraken_futures",
+            "CryptoLeverage",
+            false,
+            d(100),
+            d(60_000),
+            &now(),
+        )
+        .await
+        .expect("opened short");
+
+        // Buy 150 @ 50_000: covers the 100 short (+PnL since we
+        // are buying back cheaper), opens new long for the 50.
+        let out = db
+            .apply_fill_to_position(
+                "PI_XBTUSD",
+                "kraken_futures",
+                "CryptoLeverage",
+                true,
+                d(150),
+                d(50_000),
+                &now(),
+            )
+            .await
+            .expect("flipped");
+
+        assert_eq!(out.transition, PositionTransition::Flipped);
+        assert_eq!(out.new_quantity, d(50));
+        assert_eq!(out.new_avg_entry_price, Some(d(50_000)));
+        assert!(out.realized_pnl_btc > Decimal::ZERO);
+    }
+
+    // ---------- applied_fills dedup ----------------------------
+
+    #[tokio::test]
+    async fn has_fill_been_applied_is_false_for_unknown_id() {
+        let db = test_db().await;
+        let seen = db
+            .has_fill_been_applied("kraken_futures", "nonexistent-fill")
+            .await
+            .expect("query");
+        assert!(!seen);
+    }
+
+    #[tokio::test]
+    async fn has_fill_been_applied_is_true_after_record() {
+        let db = test_db().await;
+        db.record_fill_applied("kraken_futures", "fill-a", &now())
+            .await
+            .expect("record");
+        let seen = db
+            .has_fill_been_applied("kraken_futures", "fill-a")
+            .await
+            .expect("query");
+        assert!(seen);
+    }
+
+    #[tokio::test]
+    async fn record_fill_applied_is_idempotent() {
+        let db = test_db().await;
+        let t = now();
+        db.record_fill_applied("kraken_futures", "fill-b", &t)
+            .await
+            .expect("first record");
+        // Second insert must not fail (INSERT OR IGNORE).
+        db.record_fill_applied("kraken_futures", "fill-b", &t)
+            .await
+            .expect("second record");
+    }
+
+    #[tokio::test]
+    async fn applied_fills_are_keyed_per_broker() {
+        // Same fill_id under different brokers is legal — these
+        // are independent identity spaces.
+        let db = test_db().await;
+        let t = now();
+        db.record_fill_applied("kraken_futures", "shared-id", &t)
+            .await
+            .expect("kraken record");
+        db.record_fill_applied("some_other_broker", "shared-id", &t)
+            .await
+            .expect("other record");
+
+        assert!(db
+            .has_fill_been_applied("kraken_futures", "shared-id")
+            .await
+            .expect("kraken query"));
+        assert!(db
+            .has_fill_been_applied("some_other_broker", "shared-id")
+            .await
+            .expect("other query"));
+    }
+}
