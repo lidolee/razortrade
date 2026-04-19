@@ -102,16 +102,46 @@ fn init_tracing() {
 }
 
 fn load_config() -> Result<DaemonConfig> {
-    let path = std::env::var("RT_DAEMON_CONFIG")
-        .unwrap_or_else(|_| "/etc/razortrade/daemon.toml".to_string());
+    // Distinguish between "user explicitly pointed us at a config file"
+    // and "no env var set, fall back to the system default path".
+    // In the first case, missing/unparseable config is a hard error.
+    // In the second, missing config is expected (e.g. first boot before
+    // the operator has installed one) and we use built-in defaults.
+    let (path, explicit) = match std::env::var("RT_DAEMON_CONFIG") {
+        Ok(p) => (p, true),
+        Err(_) => ("/etc/razortrade/daemon.toml".to_string(), false),
+    };
+
+    // Use `File::new(path, FileFormat::Toml)` rather than `File::with_name(path)`.
+    // `with_name` does stem-based lookup (strips the extension and tries
+    // known formats), which silently fails on filenames like
+    // `daemon.toml.local` because `.local` is not a recognised format.
+    // `File::new` takes the path literally and the format explicitly.
+    let file_source = config::File::new(&path, config::FileFormat::Toml).required(explicit);
 
     let settings = config::Config::builder()
-        .add_source(config::File::with_name(&path).required(false))
+        .add_source(file_source)
         .add_source(config::Environment::with_prefix("RT_DAEMON").separator("__"))
         .build()
-        .context("building config")?;
+        .with_context(|| format!("building config (path={path}, explicit={explicit})"))?;
 
-    Ok(settings.try_deserialize().unwrap_or_default())
+    // Don't mask deserialisation errors with silent defaults. If the config
+    // file IS there but malformed, we want a hard failure with a clear
+    // reason, not a quiet fallback to the production defaults.
+    let cfg: DaemonConfig = if explicit {
+        settings
+            .try_deserialize()
+            .with_context(|| format!("parsing config at {path}"))?
+    } else {
+        settings.try_deserialize().unwrap_or_default()
+    };
+
+    info!(
+        config_path = %path,
+        explicit,
+        "loaded configuration"
+    );
+    Ok(cfg)
 }
 
 async fn wait_for_shutdown_signal(tx: watch::Sender<bool>) {
