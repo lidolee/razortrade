@@ -42,6 +42,8 @@ struct DaemonConfig {
     kraken: KrakenConfig,
     #[serde(default)]
     risk: RiskConfig,
+    #[serde(default)]
+    execution: ExecutionConfig,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -51,6 +53,17 @@ struct KrakenConfig {
     /// Use the demo environment. Default true for safety.
     #[serde(default = "default_true")]
     demo: bool,
+}
+
+/// Execution-side configuration. Intentionally separate from `KrakenConfig`
+/// because it applies across all brokers and controls the single most
+/// critical safety switch in the system.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct ExecutionConfig {
+    /// The execution mode. Defaults to `dry_run` — forgetting to set this
+    /// must never result in real orders.
+    #[serde(default)]
+    mode: rt_core::ExecutionMode,
 }
 
 fn default_true() -> bool {
@@ -68,6 +81,7 @@ impl Default for DaemonConfig {
                 demo: true,
             },
             risk: RiskConfig::default(),
+            execution: ExecutionConfig::default(),
         }
     }
 }
@@ -93,7 +107,7 @@ fn load_config() -> Result<DaemonConfig> {
 
     let settings = config::Config::builder()
         .add_source(config::File::with_name(&path).required(false))
-        .add_source(config::Environment::with_prefix("RF_DAEMON").separator("__"))
+        .add_source(config::Environment::with_prefix("RT_DAEMON").separator("__"))
         .build()
         .context("building config")?;
 
@@ -151,11 +165,18 @@ async fn main() -> Result<()> {
     ));
 
     // ---- Signal processor ---------------------------------------------
+    let execution_mode = config.execution.mode;
+    info!(
+        mode = ?execution_mode,
+        description = execution_mode.description(),
+        "execution mode configured"
+    );
     let processor = Arc::new(SignalProcessor::new(
         db.clone(),
         checklist.clone(),
         risk_config.clone(),
         market_data.clone(),
+        execution_mode,
     ));
 
     // ---- Shutdown plumbing --------------------------------------------

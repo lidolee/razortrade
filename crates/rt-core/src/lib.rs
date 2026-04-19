@@ -14,6 +14,7 @@
 //! 4. Invalid states must be unrepresentable. We prefer making the compiler
 //!    enforce invariants over runtime assertions.
 
+pub mod execution_mode;
 pub mod instrument;
 pub mod market_data;
 pub mod order;
@@ -21,6 +22,7 @@ pub mod portfolio;
 pub mod position;
 pub mod signal;
 
+pub use execution_mode::ExecutionMode;
 pub use instrument::{AssetClass, Broker, Instrument, Sleeve};
 pub use market_data::{MarketSnapshot, OrderBookLevel, OrderBookSnapshot};
 pub use order::{Order, OrderStatus, OrderType, Side, TimeInForce};

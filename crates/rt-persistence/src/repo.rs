@@ -186,4 +186,45 @@ impl Database {
         .await?;
         Ok(())
     }
+
+    /// Record a dry-run order intent. Called whenever an approved signal
+    /// would have resulted in a broker submission but the execution mode
+    /// is `DryRun`. Returns the auto-assigned `dry_run_orders.id`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_dry_run_order(
+        &self,
+        signal_id: i64,
+        recorded_at_iso: &str,
+        instrument_symbol: &str,
+        side: &str,
+        sleeve: &str,
+        broker_hint: &str,
+        notional_chf: &str,
+        estimated_price: Option<&str>,
+        estimated_quantity: Option<&str>,
+        intent_json: &str,
+    ) -> Result<i64> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO dry_run_orders
+                (signal_id, recorded_at, instrument_symbol, side, sleeve,
+                 broker_hint, notional_chf, estimated_price,
+                 estimated_quantity, intent_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(signal_id)
+        .bind(recorded_at_iso)
+        .bind(instrument_symbol)
+        .bind(side)
+        .bind(sleeve)
+        .bind(broker_hint)
+        .bind(notional_chf)
+        .bind(estimated_price)
+        .bind(estimated_quantity)
+        .bind(intent_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.last_insert_rowid())
+    }
 }

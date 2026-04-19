@@ -5,6 +5,31 @@ database_path = "/var/lib/razortrade/razortrade.sqlite"
 signal_poll_interval_ms = 1000
 kill_switch_check_interval_secs = 60
 
+# ============================================================================
+# Execution mode: the single most important safety switch in the system.
+# ============================================================================
+#
+# "dry_run" — approved signals are LOGGED to the dry_run_orders table only.
+#             No broker contact. This is the default and the expected mode
+#             during bring-up and validation.
+#
+# "paper"   — orders are submitted to the broker's paper/demo/sandbox API.
+#             Requires demo credentials. Broker submission is not wired yet;
+#             approved signals in this mode are currently rejected with a
+#             clear reason so they are never silently dropped.
+#
+# "live"    — orders go to the broker's PRODUCTION API. REAL MONEY AT RISK.
+#             Requires production credentials AND a deliberate configuration
+#             override. Not yet wired.
+#
+# Any value other than one of these three is rejected at config load time.
+[execution]
+mode = "dry_run"
+
+[kraken]
+products = ["PI_XBTUSD"]
+demo = true
+
 [risk]
 # Check 1: staleness
 max_tick_age_ms = 500
