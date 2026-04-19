@@ -543,8 +543,8 @@ struct OrderIntent {
 /// refuse to record.
 fn build_order_intent(signal: &Signal, market: &MarketSnapshot) -> OrderIntent {
     let estimated_price = match signal.side {
-        Side::Buy => market.order_book.bids.first().map(|l| l.price),
-        Side::Sell => market.order_book.asks.first().map(|l| l.price),
+        Side::Buy => market.order_book.asks.first().map(|l| l.price),
+        Side::Sell => market.order_book.bids.first().map(|l| l.price),
     };
 
     // Quantity estimate: convert CHF notional to the instrument's quote

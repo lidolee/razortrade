@@ -324,11 +324,22 @@ impl ExecutionBroker for KrakenFuturesRestClient {
             .send_status
             .as_ref()
             .ok_or_else(|| ExecutionError::InvalidResponse("missing sendStatus".into()))?;
-        let broker_order_id = status
-            .order_id
-            .clone()
-            .ok_or_else(|| ExecutionError::InvalidResponse("missing orderId".into()))?;
-        let status_str = status.status.as_deref().unwrap_or("received");
+        let status_str = status.status.as_deref().unwrap_or("");
+
+        // If Kraken did not return an order_id, the request was syntactically
+        // valid but Kraken refused to place the order (e.g. insufficientAvailableFunds,
+        // post_order_failed_because_it_would_be_filled, marketSuspended). These are
+        // business-logic rejections, not transport errors — surface as Rejected so
+        // the signal_processor marks the signal with broker_rejected.
+        let broker_order_id = match &status.order_id {
+            Some(id) => id.clone(),
+            None => {
+                return Err(ExecutionError::Rejected(format!(
+                    "kraken did not place order: status='{status_str}'"
+                )));
+            }
+        };
+
         Ok(SubmissionResult {
             broker_order_id,
             status: from_kraken_status(status_str),
