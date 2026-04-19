@@ -4,6 +4,13 @@ Documentation=file:/usr/share/doc/razortrade/README.md
 After=network-online.target
 Wants=network-online.target
 
+# Swing-trading cadence tolerates up to 5 crashes in 1 min before
+# systemd stops restarting. These directives belong in [Unit] (not
+# [Service]) — putting them in [Service] causes systemd to silently
+# ignore them with a 'Unknown key name' warning at load.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
 # Do NOT auto-start on boot by default. Operator must explicitly:
 #   systemctl enable --now rt-daemon.service
 # ...after provisioning credentials in /etc/razortrade/daemon.toml.
@@ -17,11 +24,9 @@ ExecStart=/usr/bin/rt-daemon
 Environment=RUST_LOG=info,rt_=info,sqlx=warn
 Environment=RT_DAEMON_CONFIG=/etc/razortrade/daemon.toml
 
-# Restart policy: swing-trading cadence tolerates up to 5 crashes in 1 min.
+# Restart policy: see [Unit] for the burst window that caps this.
 Restart=on-failure
 RestartSec=5s
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 # Graceful shutdown: SIGTERM, wait up to 15s, then SIGKILL.
 KillMode=mixed
