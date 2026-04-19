@@ -17,9 +17,20 @@ Documentation=file:/usr/share/doc/razortrade/README.md
 Requires=razortrade-signals.service
 
 [Timer]
-# Every 4h: 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC.
-# OnCalendar takes systemd calendar syntax, NOT cron.
-OnCalendar=*-*-* 00/4:00:00
+# Every 4h: 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC — exactly at
+# Kraken's 4h candle close boundaries. The explicit UTC suffix is
+# REQUIRED; without it, systemd interprets OnCalendar in the host's
+# local timezone (CEST on our prod box), causing the timer to fire 2h
+# late relative to candle close and shifting by another hour twice a
+# year on DST transitions. This matters because the Donchian signal
+# script pulls 4h candles and evaluates breakout conditions — firing
+# late means we act on signals with added latency, firing on DST
+# transitions means we fire at :00:30 CEST on the shift weekend.
+#
+# Do not drop the "UTC" suffix. Previous version pre-Drop-17 shipped
+# without it and the timer ran on CEST; symptoms were subtle (no
+# obvious errors) which is why it survived paper validation.
+OnCalendar=*-*-* 00/4:00:00 UTC
 
 # Randomised delay up to 2 minutes. Spreads load and survives the
 # "every bot fires at :00:00" thundering herd at Kraken.
