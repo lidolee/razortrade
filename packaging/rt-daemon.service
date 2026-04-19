@@ -1,0 +1,76 @@
+[Unit]
+Description=razortrade algorithmic trading daemon
+Documentation=file:/usr/share/doc/razortrade/README.md
+After=network-online.target
+Wants=network-online.target
+
+# Do NOT auto-start on boot by default. Operator must explicitly:
+#   systemctl enable --now rt-daemon.service
+# ...after provisioning credentials in /etc/razortrade/daemon.toml.
+
+[Service]
+Type=exec
+User=razortrade
+Group=razortrade
+
+ExecStart=/usr/bin/rt-daemon
+Environment=RUST_LOG=info,rt_=info,sqlx=warn
+Environment=RT_DAEMON_CONFIG=/etc/razortrade/daemon.toml
+
+# Restart policy: swing-trading cadence tolerates up to 5 crashes in 1 min.
+Restart=on-failure
+RestartSec=5s
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Graceful shutdown: SIGTERM, wait up to 15s, then SIGKILL.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# Data and logs are managed by systemd so they get proper perms even on
+# first start (no need for tmpfiles.d or post_install chown).
+StateDirectory=razortrade
+StateDirectoryMode=0750
+LogsDirectory=razortrade
+LogsDirectoryMode=0750
+WorkingDirectory=/var/lib/razortrade
+
+# Hardening — razortrade never writes outside /var/lib and /var/log,
+# never loads kernel modules, never escalates privileges.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+
+# Read/write paths are only the state/log dirs; the config is read-only.
+ReadWritePaths=/var/lib/razortrade /var/log/razortrade
+ReadOnlyPaths=/etc/razortrade
+
+# Resource caps.
+LimitNOFILE=4096
+MemoryMax=2G
+TasksMax=256
+
+# No capabilities needed (outbound HTTP+WS only).
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

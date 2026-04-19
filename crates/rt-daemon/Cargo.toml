@@ -3,6 +3,8 @@ name = "rt-daemon"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "razortrade algorithmic trading daemon"
+license.workspace = true
 
 [[bin]]
 name = "rt-daemon"
@@ -24,3 +26,59 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rust_decimal = { workspace = true }
 config = { workspace = true }
+
+# ============================================================================
+# RPM packaging (cargo-generate-rpm)
+# ============================================================================
+#
+# Build an RPM:
+#     cargo build --release -p rt-daemon
+#     cargo generate-rpm -p crates/rt-daemon
+#
+# Asset source paths are relative to the crate directory (where this
+# Cargo.toml lives), so the workspace's target/ dir is ../../target/.
+[package.metadata.generate-rpm]
+name = "rt-daemon"
+summary = "razortrade algorithmic trading daemon"
+# Disable /bin/sh auto-dependency since our scriptlets are trivial.
+# shadow-utils and systemd are declared explicitly below.
+assets = [
+    { source = "../../target/release/rt-daemon", dest = "/usr/bin/rt-daemon", mode = "0755" },
+    { source = "../../packaging/rt-daemon.service", dest = "/usr/lib/systemd/system/rt-daemon.service", mode = "0644" },
+    { source = "../../packaging/daemon.toml", dest = "/etc/razortrade/daemon.toml", mode = "0640", user = "root", group = "razortrade", config = true, config_noreplace = true },
+    { source = "../../packaging/README.md", dest = "/usr/share/doc/razortrade/README.md", mode = "0644", doc = true },
+]
+
+pre_install_script = '''
+getent group razortrade >/dev/null || groupadd -r razortrade
+getent passwd razortrade >/dev/null || \
+    useradd -r -g razortrade -d /var/lib/razortrade -s /sbin/nologin \
+        -c "razortrade trading daemon" razortrade
+exit 0
+'''
+
+post_install_script = '''
+systemctl daemon-reload >/dev/null 2>&1 || :
+# Deliberately do NOT enable or start the service. Operator must
+# provision credentials first, then:
+#   systemctl enable --now rt-daemon.service
+exit 0
+'''
+
+pre_uninstall_script = '''
+if [ "$1" = "0" ]; then
+    systemctl --no-reload disable --now rt-daemon.service >/dev/null 2>&1 || :
+fi
+exit 0
+'''
+
+post_uninstall_script = '''
+systemctl daemon-reload >/dev/null 2>&1 || :
+# User/group and /var/lib/razortrade are deliberately NOT removed.
+# See README for manual cleanup instructions.
+exit 0
+'''
+
+[package.metadata.generate-rpm.requires]
+systemd = "*"
+shadow-utils = "*"
