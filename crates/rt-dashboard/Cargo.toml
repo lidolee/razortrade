@@ -1,0 +1,33 @@
+[package]
+name = "rt-dashboard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rt-dashboard"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+# Not in workspace — inline version
+axum = "0.7"
+
+[package.metadata.generate-rpm]
+name = "rt-dashboard"
+summary = "razortrade read-only portfolio dashboard"
+assets = [
+  { source = "target/release/rt-dashboard", dest = "/usr/bin/rt-dashboard", mode = "0755" },
+  { source = "packaging/rt-dashboard.service", dest = "/usr/lib/systemd/system/rt-dashboard.service", mode = "0644" },
+]
+requires = { rt-daemon = "*" }
+post_install_script = "systemctl daemon-reload"
+pre_uninstall_script = "if [ $1 -eq 0 ]; then systemctl disable --now rt-dashboard.service 2>/dev/null || true; fi"
+post_uninstall_script = "systemctl daemon-reload"

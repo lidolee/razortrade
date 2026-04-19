@@ -1,0 +1,48 @@
+[Unit]
+Description=razortrade dashboard (read-only portfolio view)
+Documentation=file:/usr/share/doc/razortrade/README.md
+After=network.target rt-daemon.service
+# Dashboard is useful only if the daemon has written at least once;
+# Wants (not Requires) so we still come up if the daemon is down.
+Wants=rt-daemon.service
+
+# Dashboard ist harmlos (read-only mode=ro gegen die SQLite) — wenn
+# es crasht, restartet systemd einfach.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=exec
+User=razortrade
+Group=razortrade
+
+ExecStart=/usr/bin/rt-dashboard
+Environment=RUST_LOG=info
+Environment=DATABASE_URL=sqlite:///var/lib/razortrade/razortrade.sqlite?mode=ro
+Environment=RT_DASHBOARD_BIND=127.0.0.1:8080
+
+Restart=on-failure
+RestartSec=5s
+
+# Hardening. Dashboard does ONLY read queries plus local HTTP —
+# anything more paranoid than this would break it.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+ReadOnlyPaths=/var/lib/razortrade
+
+TimeoutStopSec=15s
+
+[Install]
+WantedBy=multi-user.target

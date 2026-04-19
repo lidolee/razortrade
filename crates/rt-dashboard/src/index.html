@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>razortrade</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --fg: #c9d1d9;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --pos: #3fb950;
+      --neg: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg); color: var(--fg);
+    }
+    h1 { font-size: 13px; color: var(--muted); margin: 0 0 12px 0;
+         text-transform: uppercase; letter-spacing: 1px; font-weight: 500; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 12px; margin-bottom: 24px; }
+    .card { background: var(--panel); padding: 16px; border: 1px solid var(--border);
+            border-radius: 6px; }
+    .label { font-size: 11px; color: var(--muted);
+             text-transform: uppercase; letter-spacing: 0.5px; }
+    .value { font-size: 24px; font-weight: 600; margin-top: 8px;
+             font-variant-numeric: tabular-nums; }
+    .value.pos { color: var(--pos); }
+    .value.neg { color: var(--neg); }
+    table { width: 100%; border-collapse: collapse; background: var(--panel);
+            border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+            margin-bottom: 24px; }
+    th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border);
+             font-size: 13px; font-variant-numeric: tabular-nums; }
+    th { background: var(--bg); font-weight: 500; color: var(--muted);
+         text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; }
+    tr:last-child td { border-bottom: 0; }
+    td.num { text-align: right; }
+    .pos { color: var(--pos); }
+    .neg { color: var(--neg); }
+    .chart-wrap { background: var(--panel); border: 1px solid var(--border);
+                  border-radius: 6px; padding: 16px; margin-bottom: 24px; height: 280px; }
+    .empty { padding: 16px; color: var(--muted); font-style: italic;
+             background: var(--panel); border: 1px solid var(--border);
+             border-radius: 6px; margin-bottom: 24px; }
+    .footer { color: var(--muted); font-size: 11px; margin-top: 32px;
+              display: flex; justify-content: space-between; }
+    .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+           background: var(--pos); margin-right: 4px; vertical-align: middle; }
+    .dot.stale { background: var(--neg); }
+  </style>
+</head>
+<body>
+  <h1>Summary</h1>
+  <div class="grid" id="summary"></div>
+
+  <h1>Equity curve — last 24h</h1>
+  <div class="chart-wrap"><canvas id="chart"></canvas></div>
+
+  <h1>Open positions</h1>
+  <div id="positions"></div>
+
+  <h1>Recent orders</h1>
+  <div id="orders"></div>
+
+  <div class="footer">
+    <span id="status"><span class="dot"></span>Live — refresh every 5 seconds</span>
+    <span id="last-updated"></span>
+  </div>
+
+<script>
+let chart = null;
+let lastSuccess = null;
+
+async function fetchJson(url) {
+  try {
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
+
+function fmt(n, digits) {
+  if (n === null || n === undefined || n === "") return "—";
+  const v = parseFloat(n);
+  if (isNaN(v)) return "—";
+  const d = digits === undefined ? 2 : digits;
+  return v.toLocaleString("de-CH", { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+
+function signClass(n) {
+  if (n === null || n === undefined) return "";
+  const v = parseFloat(n);
+  if (isNaN(v)) return "";
+  return v > 0 ? "pos" : v < 0 ? "neg" : "";
+}
+
+function renderSummary(s) {
+  s = s || {};
+  document.getElementById("summary").innerHTML = `
+    <div class="card">
+      <div class="label">Total equity (CHF)</div>
+      <div class="value">${fmt(s.total_equity_chf)}</div>
+    </div>
+    <div class="card">
+      <div class="label">Realized P&L lifetime (CHF)</div>
+      <div class="value ${signClass(s.realized_pnl_chf)}">${fmt(s.realized_pnl_chf)}</div>
+    </div>
+    <div class="card">
+      <div class="label">Drawdown</div>
+      <div class="value">${fmt(s.drawdown, 4)}</div>
+    </div>
+    <div class="card">
+      <div class="label">NAV per unit</div>
+      <div class="value">${fmt(s.nav_per_unit, 4)}</div>
+    </div>
+  `;
+}
+
+function renderChart(history) {
+  const labels = (history || []).map(p => p.timestamp.slice(11, 19));
+  const data = (history || []).map(p => parseFloat(p.total_equity_chf));
+
+  if (chart) {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = data;
+    chart.update("none");
+    return;
+  }
+
+  chart = new Chart(document.getElementById("chart"), {
+    type: "line",
+    data: { labels, datasets: [{
+      label: "Total equity (CHF)",
+      data,
+      borderColor: "#58a6ff",
+      backgroundColor: "rgba(88,166,255,0.12)",
+      fill: true, tension: 0.25, pointRadius: 0, borderWidth: 2,
+    }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: false,
+      scales: {
+        x: { ticks: { color: "#8b949e", maxTicksLimit: 8 },
+             grid: { color: "#21262d" } },
+        y: { ticks: { color: "#8b949e" },
+             grid: { color: "#21262d" } },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+function renderPositions(positions) {
+  if (!positions || positions.length === 0) {
+    document.getElementById("positions").innerHTML =
+      '<div class="empty">No open positions.</div>';
+    return;
+  }
+  document.getElementById("positions").innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Sleeve</th><th>Symbol</th><th>Broker</th>
+        <th class="num">Qty</th>
+        <th class="num">Avg entry</th>
+        <th class="num">Realized PnL (BTC)</th>
+        <th>Opened</th>
+      </tr></thead>
+      <tbody>
+        ${positions.map(p => `
+          <tr>
+            <td>${p.sleeve}</td>
+            <td>${p.instrument_symbol}</td>
+            <td>${p.broker}</td>
+            <td class="num">${fmt(p.quantity, 0)}</td>
+            <td class="num">${fmt(p.avg_entry_price)}</td>
+            <td class="num ${signClass(p.realized_pnl_btc)}">${fmt(p.realized_pnl_btc, 6)}</td>
+            <td>${p.opened_at ? p.opened_at.slice(0, 19).replace("T", " ") : ""}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderOrders(orders) {
+  if (!orders || orders.length === 0) {
+    document.getElementById("orders").innerHTML =
+      '<div class="empty">No orders yet.</div>';
+    return;
+  }
+  document.getElementById("orders").innerHTML = `
+    <table>
+      <thead><tr>
+        <th>Time</th><th>Symbol</th><th>Side</th><th>Status</th>
+        <th class="num">Qty</th>
+        <th class="num">Filled</th>
+        <th class="num">Avg price</th>
+      </tr></thead>
+      <tbody>
+        ${orders.map(o => `
+          <tr>
+            <td>${o.created_at ? o.created_at.slice(0, 19).replace("T", " ") : ""}</td>
+            <td>${o.instrument_symbol}</td>
+            <td>${o.side}</td>
+            <td>${o.status}</td>
+            <td class="num">${fmt(o.quantity, 0)}</td>
+            <td class="num">${fmt(o.filled_quantity, 0)}</td>
+            <td class="num">${fmt(o.avg_fill_price)}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+async function refresh() {
+  const [summary, positions, history, orders] = await Promise.all([
+    fetchJson("/api/summary"),
+    fetchJson("/api/positions"),
+    fetchJson("/api/equity-history"),
+    fetchJson("/api/recent-orders"),
+  ]);
+
+  const anyFailed = summary === null || positions === null ||
+                    history === null || orders === null;
+
+  renderSummary(summary);
+  renderChart(history);
+  renderPositions(positions);
+  renderOrders(orders);
+
+  if (!anyFailed) lastSuccess = new Date();
+
+  const statusEl = document.getElementById("status");
+  const ageSec = lastSuccess ? Math.round((Date.now() - lastSuccess) / 1000) : null;
+  if (ageSec !== null && ageSec > 15) {
+    statusEl.innerHTML = `<span class="dot stale"></span>Stale — last success ${ageSec}s ago`;
+  } else {
+    statusEl.innerHTML = `<span class="dot"></span>Live — refresh every 5 seconds`;
+  }
+
+  document.getElementById("last-updated").textContent =
+    "Rendered " + new Date().toLocaleTimeString("de-CH");
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
