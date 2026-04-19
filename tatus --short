@@ -1,3 +1,0 @@
-[33md4ca0fa[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m Drop 14: daily SQLite backup on server (ThinkStation pull script included but not used)
-[33m5510e61[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m Add Python bytecode to .gitignore
-[33m11e5297[m Drop 13: Donchian signal generator as systemd timer
