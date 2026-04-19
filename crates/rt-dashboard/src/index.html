@@ -1,258 +1,780 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>razortrade</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <style>
-    :root {
-      --bg: #0d1117;
-      --panel: #161b22;
-      --border: #30363d;
-      --fg: #c9d1d9;
-      --muted: #8b949e;
-      --accent: #58a6ff;
-      --pos: #3fb950;
-      --neg: #f85149;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; padding: 24px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-      background: var(--bg); color: var(--fg);
-    }
-    h1 { font-size: 13px; color: var(--muted); margin: 0 0 12px 0;
-         text-transform: uppercase; letter-spacing: 1px; font-weight: 500; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 12px; margin-bottom: 24px; }
-    .card { background: var(--panel); padding: 16px; border: 1px solid var(--border);
-            border-radius: 6px; }
-    .label { font-size: 11px; color: var(--muted);
-             text-transform: uppercase; letter-spacing: 0.5px; }
-    .value { font-size: 24px; font-weight: 600; margin-top: 8px;
-             font-variant-numeric: tabular-nums; }
-    .value.pos { color: var(--pos); }
-    .value.neg { color: var(--neg); }
-    table { width: 100%; border-collapse: collapse; background: var(--panel);
-            border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
-            margin-bottom: 24px; }
-    th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border);
-             font-size: 13px; font-variant-numeric: tabular-nums; }
-    th { background: var(--bg); font-weight: 500; color: var(--muted);
-         text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; }
-    tr:last-child td { border-bottom: 0; }
-    td.num { text-align: right; }
-    .pos { color: var(--pos); }
-    .neg { color: var(--neg); }
-    .chart-wrap { background: var(--panel); border: 1px solid var(--border);
-                  border-radius: 6px; padding: 16px; margin-bottom: 24px; height: 280px; }
-    .empty { padding: 16px; color: var(--muted); font-style: italic;
-             background: var(--panel); border: 1px solid var(--border);
-             border-radius: 6px; margin-bottom: 24px; }
-    .footer { color: var(--muted); font-size: 11px; margin-top: 32px;
-              display: flex; justify-content: space-between; }
-    .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
-           background: var(--pos); margin-right: 4px; vertical-align: middle; }
-    .dot.stale { background: var(--neg); }
-  </style>
+<meta charset="utf-8">
+<title>razortrade</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --bg-card: #13161b;
+    --bg-card-hover: #1a1e25;
+    --border: #232831;
+    --fg: #e6e9ef;
+    --fg-dim: #8a93a4;
+    --fg-muted: #5d6573;
+    --accent: #6aa9ff;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --err: #f87171;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 14px;
+    line-height: 1.4;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-card);
+  }
+  header h1 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  header .brand-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--ok);
+    margin-right: 10px;
+    vertical-align: middle;
+  }
+  nav {
+    display: flex;
+    gap: 4px;
+    margin-left: 32px;
+  }
+  nav button {
+    background: transparent;
+    color: var(--fg-dim);
+    border: 0;
+    padding: 8px 14px;
+    cursor: pointer;
+    font-size: 14px;
+    border-radius: 6px;
+    font-family: inherit;
+  }
+  nav button:hover { background: var(--bg-card-hover); color: var(--fg); }
+  nav button.active { background: var(--bg-card-hover); color: var(--fg); }
+  .spacer { flex: 1; }
+  .user-badge {
+    font-size: 12px;
+    color: var(--fg-muted);
+    font-family: var(--mono);
+  }
+  main {
+    padding: 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  .tab { display: none; }
+  .tab.active { display: block; }
+
+  /* Cards + grid */
+  .grid {
+    display: grid;
+    gap: 16px;
+  }
+  .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  @media (max-width: 900px) {
+    .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: 1fr; }
+  }
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .card h2 {
+    margin: 0 0 12px 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--fg-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .card.span-2 { grid-column: span 2; }
+  @media (max-width: 900px) { .card.span-2 { grid-column: auto; } }
+
+  /* Key figures */
+  .figure-big {
+    font-size: 32px;
+    font-weight: 600;
+    font-family: var(--mono);
+    letter-spacing: -0.01em;
+  }
+  .figure-mid {
+    font-size: 20px;
+    font-weight: 600;
+    font-family: var(--mono);
+  }
+  .figure-sm {
+    font-size: 14px;
+    font-family: var(--mono);
+  }
+  .figure-label {
+    color: var(--fg-muted);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-top: 4px;
+  }
+
+  /* Color states */
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .err { color: var(--err); }
+  .dim { color: var(--fg-dim); }
+
+  /* Pill badge */
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .pill.ok   { background: rgba(74, 222, 128, 0.12); color: #4ade80; }
+  .pill.warn { background: rgba(251, 191, 36, 0.12); color: #fbbf24; }
+  .pill.err  { background: rgba(248, 113, 113, 0.12); color: #f87171; }
+  .pill.dim  { background: rgba(139, 147, 164, 0.12); color: #8a93a4; }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+  th, td {
+    padding: 8px 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    color: var(--fg-muted);
+    font-weight: 500;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  td.num { text-align: right; }
+  .empty {
+    color: var(--fg-muted);
+    font-style: italic;
+    padding: 20px 0;
+    text-align: center;
+  }
+
+  /* Chart container */
+  .chart-wrap {
+    height: 280px;
+    position: relative;
+  }
+
+  /* Service rows */
+  .service-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+  .service-row:last-child { border-bottom: 0; }
+  .service-row .name { color: var(--fg); }
+  .service-row .right { color: var(--fg-dim); font-size: 12px; }
+
+  /* Footer note */
+  .footnote {
+    color: var(--fg-muted);
+    font-size: 11px;
+    margin-top: 8px;
+  }
+
+  /* KPI widget */
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .kpi {
+    padding: 12px 14px;
+    background: rgba(255,255,255,0.02);
+    border-radius: 6px;
+  }
+  .kpi .label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--fg-muted);
+    margin-bottom: 4px;
+  }
+  .kpi .value {
+    font-family: var(--mono);
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  /* Loading */
+  .skeleton {
+    background: linear-gradient(90deg, var(--bg-card), var(--bg-card-hover), var(--bg-card));
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    border-radius: 4px;
+    color: transparent;
+  }
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+</style>
 </head>
 <body>
-  <h1>Summary</h1>
-  <div class="grid" id="summary"></div>
 
-  <h1>Equity curve — last 24h</h1>
-  <div class="chart-wrap"><canvas id="chart"></canvas></div>
+<header>
+  <h1><span class="brand-dot"></span>razortrade</h1>
+  <nav>
+    <button class="tab-btn active" data-tab="trading">Trading</button>
+    <button class="tab-btn" data-tab="system">System</button>
+  </nav>
+  <div class="spacer"></div>
+  <div class="user-badge" id="user-badge"></div>
+</header>
 
-  <h1>Open positions</h1>
-  <div id="positions"></div>
+<main>
+  <!-- ============== TRADING TAB ============== -->
+  <section class="tab active" id="tab-trading">
+    <div class="grid cols-4" style="margin-bottom: 16px;">
+      <div class="card">
+        <h2>Total Equity</h2>
+        <div class="figure-big" id="equity-total">—</div>
+        <div class="figure-label" id="equity-updated">—</div>
+      </div>
+      <div class="card">
+        <h2>Cash (CHF)</h2>
+        <div class="figure-mid" id="equity-cash">—</div>
+        <div class="figure-label">flex account USD → CHF</div>
+      </div>
+      <div class="card">
+        <h2>Leverage (CHF)</h2>
+        <div class="figure-mid" id="equity-leverage">—</div>
+        <div class="figure-label">fi_xbtusd portfolio value</div>
+      </div>
+      <div class="card">
+        <h2>Realised PnL</h2>
+        <div class="figure-mid" id="equity-realized">—</div>
+        <div class="figure-label">CryptoLeverage lifetime</div>
+      </div>
+    </div>
 
-  <h1>Recent orders</h1>
-  <div id="orders"></div>
+    <div class="grid cols-2" style="margin-bottom: 16px;">
+      <div class="card span-2">
+        <h2>Equity — 24h</h2>
+        <div class="chart-wrap"><canvas id="equity-chart"></canvas></div>
+      </div>
+    </div>
 
-  <div class="footer">
-    <span id="status"><span class="dot"></span>Live — refresh every 5 seconds</span>
-    <span id="last-updated"></span>
-  </div>
+    <div class="grid cols-2" style="margin-bottom: 16px;">
+      <div class="card">
+        <h2>Open Positions</h2>
+        <div id="positions-body">
+          <div class="empty">no open positions</div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Recent Orders</h2>
+        <div id="orders-body">
+          <div class="empty">no orders yet</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid cols-1">
+      <div class="card">
+        <h2>Recent Signals</h2>
+        <div id="signals-body">
+          <div class="empty">no signals yet</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============== SYSTEM TAB ============== -->
+  <section class="tab" id="tab-system">
+    <div class="grid cols-4" style="margin-bottom: 16px;">
+      <div class="card">
+        <h2>Equity Writer</h2>
+        <div class="figure-mid" id="fresh-equity-age">—</div>
+        <div class="figure-label">age of latest snapshot</div>
+      </div>
+      <div class="card">
+        <h2>Signal Generator</h2>
+        <div class="figure-mid" id="fresh-signal-age">—</div>
+        <div class="figure-label">age of latest signal</div>
+      </div>
+      <div class="card">
+        <h2>Counters</h2>
+        <div class="kpi-grid" style="grid-template-columns: 1fr 1fr;">
+          <div class="kpi"><div class="label">snapshots</div><div class="value" id="fresh-equity-count">—</div></div>
+          <div class="kpi"><div class="label">signals</div><div class="value" id="fresh-signal-count">—</div></div>
+          <div class="kpi"><div class="label">fills</div><div class="value" id="fresh-fills-count">—</div></div>
+          <div class="kpi"><div class="label">kill-switch</div><div class="value" id="fresh-ks-count">—</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Disk</h2>
+        <div id="disk-body"><div class="empty">loading…</div></div>
+      </div>
+    </div>
+
+    <div class="grid cols-2" style="margin-bottom: 16px;">
+      <div class="card">
+        <h2>Services</h2>
+        <div id="services-body"><div class="empty">loading…</div></div>
+      </div>
+      <div class="card">
+        <h2>Timers</h2>
+        <div id="timers-body"><div class="empty">loading…</div></div>
+      </div>
+    </div>
+
+    <div class="grid cols-1">
+      <div class="card">
+        <h2>Backup</h2>
+        <div class="kpi-grid" id="backup-body">
+          <div class="empty">loading…</div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
 
 <script>
-let chart = null;
-let lastSuccess = null;
-
-async function fetchJson(url) {
-  try {
-    const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) return null;
-    return await r.json();
-  } catch (e) { return null; }
-}
-
-function fmt(n, digits) {
-  if (n === null || n === undefined || n === "") return "—";
-  const v = parseFloat(n);
-  if (isNaN(v)) return "—";
-  const d = digits === undefined ? 2 : digits;
-  return v.toLocaleString("de-CH", { minimumFractionDigits: d, maximumFractionDigits: d });
-}
-
-function signClass(n) {
-  if (n === null || n === undefined) return "";
-  const v = parseFloat(n);
-  if (isNaN(v)) return "";
-  return v > 0 ? "pos" : v < 0 ? "neg" : "";
-}
-
-function renderSummary(s) {
-  s = s || {};
-  document.getElementById("summary").innerHTML = `
-    <div class="card">
-      <div class="label">Total equity (CHF)</div>
-      <div class="value">${fmt(s.total_equity_chf)}</div>
-    </div>
-    <div class="card">
-      <div class="label">Realized P&L lifetime (CHF)</div>
-      <div class="value ${signClass(s.realized_pnl_chf)}">${fmt(s.realized_pnl_chf)}</div>
-    </div>
-    <div class="card">
-      <div class="label">Drawdown</div>
-      <div class="value">${fmt(s.drawdown, 4)}</div>
-    </div>
-    <div class="card">
-      <div class="label">NAV per unit</div>
-      <div class="value">${fmt(s.nav_per_unit, 4)}</div>
-    </div>
-  `;
-}
-
-function renderChart(history) {
-  const labels = (history || []).map(p => p.timestamp.slice(11, 19));
-  const data = (history || []).map(p => parseFloat(p.total_equity_chf));
-
-  if (chart) {
-    chart.data.labels = labels;
-    chart.data.datasets[0].data = data;
-    chart.update("none");
-    return;
-  }
-
-  chart = new Chart(document.getElementById("chart"), {
-    type: "line",
-    data: { labels, datasets: [{
-      label: "Total equity (CHF)",
-      data,
-      borderColor: "#58a6ff",
-      backgroundColor: "rgba(88,166,255,0.12)",
-      fill: true, tension: 0.25, pointRadius: 0, borderWidth: 2,
-    }] },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      animation: false,
-      scales: {
-        x: { ticks: { color: "#8b949e", maxTicksLimit: 8 },
-             grid: { color: "#21262d" } },
-        y: { ticks: { color: "#8b949e" },
-             grid: { color: "#21262d" } },
-      },
-      plugins: { legend: { display: false } },
-    },
+// ============================================================
+// Tab switching
+// ============================================================
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
   });
+});
+
+// ============================================================
+// Formatting helpers
+// ============================================================
+function fmtCHF(v) {
+  if (v === null || v === undefined || v === '') return '—';
+  const n = parseFloat(v);
+  if (Number.isNaN(n)) return v;
+  return n.toLocaleString('de-CH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' CHF';
+}
+function fmtNum(v, digits=2) {
+  if (v === null || v === undefined || v === '') return '—';
+  const n = parseFloat(v);
+  if (Number.isNaN(n)) return v;
+  return n.toLocaleString('de-CH', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+function fmtBytes(n) {
+  if (n === null || n === undefined) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(n < 10 ? 2 : 1) + ' ' + units[i];
+}
+function fmtDuration(seconds) {
+  if (seconds === null || seconds === undefined) return '—';
+  const s = Math.abs(seconds);
+  if (s < 60) return Math.floor(s) + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+  return Math.floor(s / 86400) + 'd ' + Math.floor((s % 86400) / 3600) + 'h';
+}
+function fmtISO(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString('de-CH', { timeZone: 'Europe/Zurich' });
+}
+function pill(text, level) {
+  return `<span class="pill ${level}">${text}</span>`;
 }
 
-function renderPositions(positions) {
-  if (!positions || positions.length === 0) {
-    document.getElementById("positions").innerHTML =
-      '<div class="empty">No open positions.</div>';
-    return;
+// Classify freshness age in seconds. Threshold depends on expected cadence.
+function freshnessClass(seconds, expectedSeconds) {
+  if (seconds === null || seconds === undefined) return 'err';
+  if (seconds < expectedSeconds * 2) return 'ok';
+  if (seconds < expectedSeconds * 10) return 'warn';
+  return 'err';
+}
+
+// ============================================================
+// Trading tab — fetchers
+// ============================================================
+let equityChart = null;
+
+async function refreshSummary() {
+  try {
+    const r = await fetch('/api/summary');
+    const s = await r.json();
+    document.getElementById('equity-total').textContent = fmtCHF(s.total_equity_chf);
+    document.getElementById('equity-cash').textContent = fmtCHF(s.cash_chf);
+    document.getElementById('equity-leverage').textContent = fmtCHF(s.crypto_leverage_value_chf);
+
+    const realized = document.getElementById('equity-realized');
+    realized.textContent = fmtCHF(s.realized_pnl_chf);
+    const rv = parseFloat(s.realized_pnl_chf);
+    realized.className = 'figure-mid ' + (rv < 0 ? 'err' : (rv > 0 ? 'ok' : 'dim'));
+
+    const updated = document.getElementById('equity-updated');
+    if (s.updated_at) {
+      const ago = (Date.now() - new Date(s.updated_at).getTime()) / 1000;
+      updated.textContent = `updated ${fmtDuration(ago)} ago`;
+    } else {
+      updated.textContent = 'no data';
+    }
+  } catch (e) {
+    console.error('summary', e);
   }
-  document.getElementById("positions").innerHTML = `
-    <table>
-      <thead><tr>
-        <th>Sleeve</th><th>Symbol</th><th>Broker</th>
-        <th class="num">Qty</th>
-        <th class="num">Avg entry</th>
-        <th class="num">Realized PnL (BTC)</th>
-        <th>Opened</th>
-      </tr></thead>
-      <tbody>
-        ${positions.map(p => `
-          <tr>
-            <td>${p.sleeve}</td>
-            <td>${p.instrument_symbol}</td>
-            <td>${p.broker}</td>
-            <td class="num">${fmt(p.quantity, 0)}</td>
-            <td class="num">${fmt(p.avg_entry_price)}</td>
-            <td class="num ${signClass(p.realized_pnl_btc)}">${fmt(p.realized_pnl_btc, 6)}</td>
-            <td>${p.opened_at ? p.opened_at.slice(0, 19).replace("T", " ") : ""}</td>
-          </tr>
-        `).join("")}
-      </tbody>
-    </table>
-  `;
 }
 
-function renderOrders(orders) {
-  if (!orders || orders.length === 0) {
-    document.getElementById("orders").innerHTML =
-      '<div class="empty">No orders yet.</div>';
-    return;
+async function refreshEquityChart() {
+  try {
+    const r = await fetch('/api/equity-history');
+    const hist = await r.json();
+    const labels = hist.map(p => new Date(p.timestamp));
+    const data = hist.map(p => parseFloat(p.total_equity_chf));
+
+    const ctx = document.getElementById('equity-chart');
+    if (equityChart) {
+      equityChart.data.labels = labels;
+      equityChart.data.datasets[0].data = data;
+      equityChart.update('none');
+    } else {
+      equityChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: 'Total Equity (CHF)',
+            data,
+            borderColor: '#6aa9ff',
+            backgroundColor: 'rgba(106, 169, 255, 0.08)',
+            fill: true,
+            tension: 0.25,
+            pointRadius: 0,
+            borderWidth: 2,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#13161b',
+              borderColor: '#232831',
+              borderWidth: 1,
+              titleColor: '#e6e9ef',
+              bodyColor: '#e6e9ef',
+            },
+          },
+          scales: {
+            x: {
+              type: 'time',
+              time: { unit: 'hour' },
+              grid: { color: '#232831' },
+              ticks: { color: '#8a93a4' },
+            },
+            y: {
+              grid: { color: '#232831' },
+              ticks: { color: '#8a93a4', callback: v => v.toLocaleString() },
+            },
+          },
+        },
+      });
+    }
+  } catch (e) {
+    console.error('equity-chart', e);
   }
-  document.getElementById("orders").innerHTML = `
-    <table>
-      <thead><tr>
-        <th>Time</th><th>Symbol</th><th>Side</th><th>Status</th>
-        <th class="num">Qty</th>
-        <th class="num">Filled</th>
-        <th class="num">Avg price</th>
-      </tr></thead>
-      <tbody>
-        ${orders.map(o => `
-          <tr>
-            <td>${o.created_at ? o.created_at.slice(0, 19).replace("T", " ") : ""}</td>
-            <td>${o.instrument_symbol}</td>
-            <td>${o.side}</td>
-            <td>${o.status}</td>
-            <td class="num">${fmt(o.quantity, 0)}</td>
-            <td class="num">${fmt(o.filled_quantity, 0)}</td>
-            <td class="num">${fmt(o.avg_fill_price)}</td>
-          </tr>
-        `).join("")}
-      </tbody>
-    </table>
-  `;
 }
 
-async function refresh() {
-  const [summary, positions, history, orders] = await Promise.all([
-    fetchJson("/api/summary"),
-    fetchJson("/api/positions"),
-    fetchJson("/api/equity-history"),
-    fetchJson("/api/recent-orders"),
-  ]);
-
-  const anyFailed = summary === null || positions === null ||
-                    history === null || orders === null;
-
-  renderSummary(summary);
-  renderChart(history);
-  renderPositions(positions);
-  renderOrders(orders);
-
-  if (!anyFailed) lastSuccess = new Date();
-
-  const statusEl = document.getElementById("status");
-  const ageSec = lastSuccess ? Math.round((Date.now() - lastSuccess) / 1000) : null;
-  if (ageSec !== null && ageSec > 15) {
-    statusEl.innerHTML = `<span class="dot stale"></span>Stale — last success ${ageSec}s ago`;
-  } else {
-    statusEl.innerHTML = `<span class="dot"></span>Live — refresh every 5 seconds`;
-  }
-
-  document.getElementById("last-updated").textContent =
-    "Rendered " + new Date().toLocaleTimeString("de-CH");
+async function refreshPositions() {
+  try {
+    const r = await fetch('/api/positions');
+    const rows = await r.json();
+    const body = document.getElementById('positions-body');
+    if (rows.length === 0) {
+      body.innerHTML = '<div class="empty">no open positions</div>';
+      return;
+    }
+    body.innerHTML = `
+      <table>
+        <thead><tr><th>Symbol</th><th>Sleeve</th><th class="num">Qty</th><th class="num">Avg Entry</th><th class="num">PnL (BTC)</th></tr></thead>
+        <tbody>
+          ${rows.map(p => `
+            <tr>
+              <td>${p.instrument_symbol}</td>
+              <td class="dim">${p.sleeve}</td>
+              <td class="num">${p.quantity}</td>
+              <td class="num">${p.avg_entry_price ?? '—'}</td>
+              <td class="num">${p.realized_pnl_btc}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch (e) { console.error('positions', e); }
 }
 
-refresh();
-setInterval(refresh, 5000);
+async function refreshOrders() {
+  try {
+    const r = await fetch('/api/recent-orders');
+    const rows = await r.json();
+    const body = document.getElementById('orders-body');
+    if (rows.length === 0) {
+      body.innerHTML = '<div class="empty">no orders yet</div>';
+      return;
+    }
+    body.innerHTML = `
+      <table>
+        <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Status</th><th class="num">Qty</th></tr></thead>
+        <tbody>
+          ${rows.map(o => `
+            <tr>
+              <td class="dim">${fmtISO(o.created_at)}</td>
+              <td>${o.instrument_symbol}</td>
+              <td>${o.side}</td>
+              <td>${o.status}</td>
+              <td class="num">${o.quantity}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch (e) { console.error('orders', e); }
+}
+
+async function refreshSignals() {
+  try {
+    const r = await fetch('/api/recent-signals');
+    const rows = await r.json();
+    const body = document.getElementById('signals-body');
+    if (rows.length === 0) {
+      body.innerHTML = '<div class="empty">no signals yet</div>';
+      return;
+    }
+    body.innerHTML = `
+      <table>
+        <thead><tr><th>Time</th><th>Symbol</th><th>Type</th><th>Sleeve</th><th>Status</th><th>Reason</th></tr></thead>
+        <tbody>
+          ${rows.map(s => {
+            let rej = '';
+            if (s.rejection_reason) {
+              try {
+                const j = JSON.parse(s.rejection_reason);
+                rej = j.summary || j.kind || s.rejection_reason.substring(0, 60);
+              } catch { rej = s.rejection_reason.substring(0, 60); }
+            }
+            const statusClass = s.status === 'approved' ? 'ok'
+                             : s.status === 'rejected' ? 'warn'
+                             : 'dim';
+            return `
+              <tr>
+                <td class="dim">${fmtISO(s.created_at)}</td>
+                <td>${s.instrument_symbol}</td>
+                <td>${s.signal_type}</td>
+                <td class="dim">${s.sleeve}</td>
+                <td>${pill(s.status, statusClass)}</td>
+                <td class="dim" title="${rej.replace(/"/g, '&quot;')}">${rej.length > 50 ? rej.substring(0, 50) + '…' : rej}</td>
+              </tr>`;
+          }).join('')}
+        </tbody>
+      </table>`;
+  } catch (e) { console.error('signals', e); }
+}
+
+// ============================================================
+// System tab — fetchers
+// ============================================================
+async function refreshFreshness() {
+  try {
+    const r = await fetch('/api/freshness');
+    const f = await r.json();
+
+    const eqEl = document.getElementById('fresh-equity-age');
+    if (f.seconds_since_equity_snapshot !== null) {
+      eqEl.textContent = fmtDuration(f.seconds_since_equity_snapshot);
+      // Equity writer ticks every 30 s.
+      eqEl.className = 'figure-mid ' + freshnessClass(f.seconds_since_equity_snapshot, 30);
+    } else {
+      eqEl.textContent = '—';
+      eqEl.className = 'figure-mid err';
+    }
+
+    const sigEl = document.getElementById('fresh-signal-age');
+    if (f.seconds_since_last_signal !== null) {
+      sigEl.textContent = fmtDuration(f.seconds_since_last_signal);
+      // Signal timer fires every 4 h = 14400 s.
+      sigEl.className = 'figure-mid ' + freshnessClass(f.seconds_since_last_signal, 14400);
+    } else {
+      sigEl.textContent = 'never';
+      sigEl.className = 'figure-mid dim';
+    }
+
+    document.getElementById('fresh-equity-count').textContent = f.equity_snapshot_count_total;
+    document.getElementById('fresh-signal-count').textContent = f.signal_count_total;
+    document.getElementById('fresh-fills-count').textContent = f.applied_fills_total;
+
+    const ksEl = document.getElementById('fresh-ks-count');
+    ksEl.textContent = f.unresolved_kill_switch_events;
+    ksEl.style.color = f.unresolved_kill_switch_events > 0 ? 'var(--err)' : 'var(--ok)';
+  } catch (e) { console.error('freshness', e); }
+}
+
+async function refreshServices() {
+  try {
+    const r = await fetch('/api/system-status');
+    const rows = await r.json();
+    const body = document.getElementById('services-body');
+    body.innerHTML = rows.map(s => {
+      const stateLevel = s.active_state === 'active' ? 'ok'
+                      : s.active_state === 'activating' ? 'warn'
+                      : 'err';
+      const short = s.name.replace('.service', '').replace('.timer', ' (timer)');
+      const detail = s.active_state === 'active' && s.uptime_seconds !== null
+                  ? `up ${fmtDuration(s.uptime_seconds)}`
+                  : (s.sub_state || s.active_state);
+      const mem = s.memory_bytes ? `· ${fmtBytes(s.memory_bytes)}` : '';
+      return `
+        <div class="service-row">
+          <div class="name">${pill(s.active_state, stateLevel)} ${short}</div>
+          <div class="right">${detail} ${mem}</div>
+        </div>`;
+    }).join('');
+  } catch (e) { console.error('services', e); }
+}
+
+async function refreshTimers() {
+  try {
+    const r = await fetch('/api/timers');
+    const rows = await r.json();
+    const body = document.getElementById('timers-body');
+    body.innerHTML = rows.map(t => {
+      const short = t.name.replace('razortrade-', '').replace('.timer', '');
+      const next = t.seconds_until_next !== null
+        ? `in ${fmtDuration(t.seconds_until_next)}`
+        : '—';
+      const last = t.seconds_since_last !== null
+        ? `${fmtDuration(t.seconds_since_last)} ago`
+        : 'never';
+      return `
+        <div class="service-row">
+          <div class="name">${short}</div>
+          <div class="right">next ${next} · last ${last}</div>
+        </div>`;
+    }).join('');
+  } catch (e) { console.error('timers', e); }
+}
+
+async function refreshDisk() {
+  try {
+    const r = await fetch('/api/disk');
+    const rows = await r.json();
+    const body = document.getElementById('disk-body');
+    if (rows.length === 0) {
+      body.innerHTML = '<div class="empty">no disk info</div>';
+      return;
+    }
+    body.innerHTML = rows.map(d => {
+      const level = d.use_percent > 90 ? 'err' : d.use_percent > 70 ? 'warn' : 'ok';
+      return `
+        <div class="service-row">
+          <div class="name">${d.path}</div>
+          <div class="right ${level}">${d.use_percent}% · ${fmtBytes(d.available_bytes)} free</div>
+        </div>`;
+    }).join('');
+  } catch (e) { console.error('disk', e); }
+}
+
+async function refreshBackup() {
+  try {
+    const r = await fetch('/api/backup-status');
+    const b = await r.json();
+    const body = document.getElementById('backup-body');
+
+    const exitLevel = b.last_exit_status === '0' ? 'ok'
+                    : b.last_exit_status ? 'err' : 'dim';
+    const lastRun = b.seconds_since_last_run !== null
+                 ? `${fmtDuration(b.seconds_since_last_run)} ago`
+                 : 'never';
+    const nextRun = b.seconds_until_next_run !== null
+                 ? `in ${fmtDuration(b.seconds_until_next_run)}`
+                 : '—';
+    body.innerHTML = `
+      <div class="kpi">
+        <div class="label">Last run</div>
+        <div class="value">${lastRun}</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Exit status</div>
+        <div class="value">${pill(b.last_exit_status ?? 'n/a', exitLevel)}</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Next run</div>
+        <div class="value">${nextRun}</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Local backups</div>
+        <div class="value">${b.local_backup_count}</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Latest local</div>
+        <div class="value">${b.local_backup_latest_iso ?? '—'}</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Latest size</div>
+        <div class="value">${fmtBytes(b.local_backup_latest_bytes)}</div>
+      </div>`;
+  } catch (e) { console.error('backup', e); }
+}
+
+// ============================================================
+// Refresh scheduler
+// ============================================================
+async function refreshAll() {
+  // Trading tab (always refresh — it's cheap and the user might switch tabs)
+  refreshSummary();
+  refreshPositions();
+  refreshOrders();
+  refreshSignals();
+  refreshEquityChart();
+  // System tab
+  refreshFreshness();
+  refreshServices();
+  refreshTimers();
+  refreshDisk();
+  refreshBackup();
+}
+
+refreshAll();
+setInterval(refreshAll, 5000);
 </script>
 </body>
 </html>

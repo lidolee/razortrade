@@ -1,0 +1,83 @@
+# razortrade dashboard reverse proxy + Let's Encrypt TLS
+#
+# This file is managed by the dashboard-auth-setup.sh installer. Hand
+# edits are preserved across RPM upgrades because this isn't shipped
+# via the rt-daemon RPM — it's installed once by the operator and
+# lives under /etc/caddy/Caddyfile.
+#
+# Architecture:
+#   Internet → Caddy (443/TLS) → forward_auth → oauth2-proxy (4180)
+#                              → reverse_proxy → rt-dashboard (8080)
+#
+# Caddy handles TLS automatically via ACME/Let's Encrypt. On first
+# start it obtains a cert for the configured domain, then renews at
+# ~2/3 of validity. Requires ports 80 (HTTP-01 challenge, also http→https
+# redirect) and 443 (serving) reachable from the internet.
+
+{
+    # Email for Let's Encrypt account registration. Used for expiry
+    # reminders if auto-renewal ever fails.
+    email ops@ghazzo.ch
+
+    # Disable Caddy's default admin endpoint; we manage via systemctl.
+    admin off
+}
+
+trader.ghazzo.ch {
+    # Security headers. HSTS is one year with preload list eligibility.
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+        # Remove the X-Powered-By and Server headers Caddy inherits.
+        -Server
+    }
+
+    # Access log to journal so we can see authorised requests next
+    # to daemon logs.
+    log {
+        output stdout
+        format json
+    }
+
+    # oauth2-proxy's own endpoints: sign-in page, OAuth callback, sign-out.
+    # These MUST be reachable without auth — the user has no session yet.
+    handle /oauth2/* {
+        reverse_proxy 127.0.0.1:4180 {
+            # oauth2-proxy needs to know the external host for callback
+            # URL construction and cookie-domain logic.
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # All other paths: authenticate via oauth2-proxy's /oauth2/auth
+    # internal endpoint, then reverse-proxy to the Rust dashboard.
+    handle {
+        forward_auth 127.0.0.1:4180 {
+            uri /oauth2/auth
+
+            # oauth2-proxy returns 202 for authenticated, 401 otherwise.
+            # On 401 we redirect the user to the sign-in page; the
+            # `rd` query param brings them back here after login.
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+
+            copy_headers X-Auth-Request-User X-Auth-Request-Email
+
+            @oauth2_error status 401
+            handle_response @oauth2_error {
+                redir * https://trader.ghazzo.ch/oauth2/sign_in?rd={http.request.uri} 302
+            }
+        }
+
+        reverse_proxy 127.0.0.1:8080 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+}
