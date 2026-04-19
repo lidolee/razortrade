@@ -40,7 +40,7 @@ mod tests {
     use crate::RiskConfig;
     use chrono::{Duration, Utc};
     use rt_core::{
-        instrument::{Broker, Sleeve},
+        instrument::Sleeve,
         market_data::{MarketSnapshot, OrderBookLevel, OrderBookSnapshot},
         order::Side,
         portfolio::{PortfolioState, SleeveState},

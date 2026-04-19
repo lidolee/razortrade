@@ -27,6 +27,7 @@ use rust_decimal::Decimal;
 use serde_json::Value;
 use thiserror::Error;
 
+#[allow(dead_code)] // OutOfSync reserved for upcoming sequence-gap wiring
 #[derive(Debug, Error)]
 pub enum MarketDataError {
     #[error("no book available for {symbol}")]
@@ -65,6 +66,7 @@ impl MarketDataService {
         }
     }
 
+    #[allow(dead_code)] // builder reserved for upcoming config wiring
     pub fn with_depth(mut self, depth: usize) -> Self {
         self.depth = depth;
         self
