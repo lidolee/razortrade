@@ -99,10 +99,28 @@ pub struct RiskConfig {
     /// Operators tuning this should explicitly set it in daemon.toml.
     #[serde(default = "default_max_notional_chf_per_order")]
     pub max_notional_chf_per_order: Decimal,
+
+    /// Fallback USD-per-CHF FX rate used by the equity snapshot
+    /// writer when no fresh signal is available to supply
+    /// `fx_quote_per_chf` via metadata. Signals remain the preferred
+    /// source; this default only kicks in for background equity
+    /// tracking that must not stall just because the signal generator
+    /// is between runs.
+    ///
+    /// Intended to be refreshed manually (config reload) during
+    /// periods of significant FX moves. Default 1.10 (CHF slightly
+    /// weaker than USD, a rough mid-2020s mid).
+    #[serde(default = "default_usd_per_chf_fallback")]
+    pub usd_per_chf_fallback: Decimal,
 }
 
 fn default_max_notional_chf_per_order() -> Decimal {
     Decimal::from(1000)
+}
+
+fn default_usd_per_chf_fallback() -> Decimal {
+    // Decimal::new(mantissa, scale) → 110 / 10^1 = 1.10
+    Decimal::new(110, 2)
 }
 
 impl Default for RiskConfig {
@@ -124,6 +142,7 @@ impl Default for RiskConfig {
             max_funding_rate_per_8h: Decimal::new(2, 4),
             max_leverage: Decimal::from(2),
             max_notional_chf_per_order: default_max_notional_chf_per_order(),
+            usd_per_chf_fallback: default_usd_per_chf_fallback(),
         }
     }
 }

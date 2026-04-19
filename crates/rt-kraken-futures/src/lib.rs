@@ -22,6 +22,7 @@
 //!   are made via the public `Broker` trait methods.
 
 pub mod auth;
+pub mod accounts;
 pub mod messages;
 pub mod orderbook;
 pub mod private_state;

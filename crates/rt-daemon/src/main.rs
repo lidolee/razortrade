@@ -17,6 +17,7 @@
 //! SIGTERM / SIGINT → the watch channel flips → all tasks drain and exit.
 //! systemd sends SIGTERM by default with a 15 s `TimeoutStopSec`.
 
+mod equity_writer;
 mod fill_reconciler;
 mod market_data;
 mod portfolio_loader;
@@ -214,8 +215,19 @@ async fn main() -> Result<()> {
     // health_check() at startup. If either fails we refuse to start,
     // because silent fallback to a different endpoint would be a
     // correctness nightmare (demo funds != production funds).
-    let crypto_leverage_broker: Option<Arc<dyn Broker>> = match execution_mode {
-        ExecutionMode::DryRun => None,
+    //
+    // We keep TWO handles to the same client:
+    //   - `crypto_leverage_broker: Arc<dyn Broker>` for the trait-using
+    //     call sites (signal processor, potentially other brokers).
+    //   - `kraken_concrete: Arc<KrakenFuturesRestClient>` for call sites
+    //     that need broker-specific endpoints like /accounts — the
+    //     equity writer today (Drop 12). Both Arcs point at the same
+    //     underlying client and share its reqwest connection pool.
+    let (crypto_leverage_broker, kraken_concrete): (
+        Option<Arc<dyn Broker>>,
+        Option<Arc<KrakenFuturesRestClient>>,
+    ) = match execution_mode {
+        ExecutionMode::DryRun => (None, None),
         ExecutionMode::Paper | ExecutionMode::Live => {
             let creds = Credentials::from_env().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -224,21 +236,23 @@ async fn main() -> Result<()> {
                     execution_mode
                 )
             })?;
-            let client: Arc<dyn Broker> = if matches!(execution_mode, ExecutionMode::Paper) {
-                Arc::new(KrakenFuturesRestClient::demo(Some(creds)))
-            } else {
-                Arc::new(KrakenFuturesRestClient::production(Some(creds)))
-            };
+            let concrete: Arc<KrakenFuturesRestClient> =
+                if matches!(execution_mode, ExecutionMode::Paper) {
+                    Arc::new(KrakenFuturesRestClient::demo(Some(creds)))
+                } else {
+                    Arc::new(KrakenFuturesRestClient::production(Some(creds)))
+                };
             info!(
                 mode = ?execution_mode,
                 "broker client constructed, running health check…"
             );
-            client
+            concrete
                 .health_check()
                 .await
                 .context("kraken futures broker health check failed at startup")?;
             info!("broker health check passed");
-            Some(client)
+            let trait_obj: Arc<dyn Broker> = concrete.clone();
+            (Some(trait_obj), Some(concrete))
         }
     };
 
@@ -291,6 +305,17 @@ async fn main() -> Result<()> {
         tokio::spawn(async move { fill_reconciler::run(db, fills, tick, rx).await })
     };
 
+    // Drop 12: periodic equity snapshot writer. Only runs when we
+    // have a real broker client (Paper / Live). In DryRun there is
+    // nothing to snapshot against.
+    let equity_writer_handle = kraken_concrete.clone().map(|client| {
+        let db = db.clone();
+        let tickers = ws_client.tickers();
+        let risk = risk_config.clone();
+        let rx = shutdown_rx.clone();
+        tokio::spawn(async move { equity_writer::run(db, client, tickers, risk, rx).await })
+    });
+
     // ---- Wait for shutdown --------------------------------------------
     wait_for_shutdown_signal(shutdown_tx).await;
     info!("shutting down…");
@@ -300,6 +325,9 @@ async fn main() -> Result<()> {
         let _ = poller_handle.await;
         let _ = supervisor_handle.await;
         let _ = fill_reconciler_handle.await;
+        if let Some(h) = equity_writer_handle {
+            let _ = h.await;
+        }
     })
     .await;
 

@@ -59,3 +59,7 @@ max_funding_rate_per_8h = "0.0002"
 # Per-order notional ceiling in CHF. Defensive cap against signal-generator
 # bugs. Default 1000 — override if you run larger sleeves.
 max_notional_chf_per_order = "1000"
+
+# FX fallback used by the equity snapshot writer (Drop 12).
+# USD per CHF. Default 1.10.
+usd_per_chf_fallback = "1.10"

@@ -72,9 +72,16 @@ impl KrakenFuturesRestClient {
         })?;
         let nonce = self.nonces.next()?;
 
-        // The endpoint path used for signing MUST match what Kraken's
-        // server sees (i.e. the path after the host, without query string).
+        // The full endpoint path for the HTTP request URL.
         let endpoint_path = format!("{}{}", REST_API_PREFIX, path);
+
+        // Kraken's signing requires the path WITHOUT the /derivatives prefix,
+        // even though the URL includes it. The official Python client
+        // (cfRestApiV3.py::sign_message) strips '/derivatives' before hashing.
+        // For GET /accounts Kraken tolerates either variant, but for POST
+        // endpoints like /sendorder it does not — signing with the full
+        // path yields `authenticationError`. To be safe and consistent,
+        // always sign the stripped path.
         let authent = sign_rest_request(&creds.api_secret_b64, query, &nonce, path)?;
 
         let mut url = format!("{}{}", self.base_url, endpoint_path);
@@ -112,6 +119,7 @@ impl KrakenFuturesRestClient {
         })?;
         let nonce = self.nonces.next()?;
         let endpoint_path = format!("{}{}", REST_API_PREFIX, path);
+        // See note in authed_get: sign the path WITHOUT /derivatives prefix.
         let authent =
             sign_rest_request(&creds.api_secret_b64, body_json, &nonce, path)?;
 
@@ -143,6 +151,7 @@ impl KrakenFuturesRestClient {
         })?;
         let nonce = self.nonces.next()?;
         let endpoint_path = format!("{}{}", REST_API_PREFIX, path);
+        // See note in authed_get: sign the path WITHOUT /derivatives prefix.
         let authent =
             sign_rest_request(&creds.api_secret_b64, form_body, &nonce, path)?;
 
@@ -257,6 +266,28 @@ impl KrakenFuturesRestClient {
         let parsed: ResponseEnvelope = serde_json::from_str(&text)?;
         Ok(parsed)
     }
+
+    /// Fetch the full `/accounts` payload, parsed into a typed
+    /// [`AccountsResponse`]. Used by the equity writer (Drop 12) to
+    /// snapshot cash and margin state once per minute.
+    ///
+    /// Unlike [`Self::server_time`] which also targets `/accounts`
+    /// for its side effect of being cheap, this method actually
+    /// deserialises the response into strongly-typed structs so
+    /// callers get `Option<FlexAccount>` / `Option<MarginAccount>`
+    /// rather than raw JSON.
+    #[instrument(skip(self))]
+    pub async fn get_accounts(&self) -> KrakenResult<crate::accounts::AccountsResponse> {
+        let text = self.authed_get("/api/v3/accounts", "").await?;
+        let parsed: crate::accounts::AccountsResponse = serde_json::from_str(&text)?;
+        if !matches!(parsed.result.as_str(), "success") {
+            return Err(KrakenError::Api {
+                code: Some(parsed.result.clone()),
+                message: "accounts endpoint returned non-success result".to_string(),
+            });
+        }
+        Ok(parsed)
+    }
 }
 
 // =============================================================
@@ -326,11 +357,16 @@ impl ExecutionBroker for KrakenFuturesRestClient {
             .ok_or_else(|| ExecutionError::InvalidResponse("missing sendStatus".into()))?;
         let status_str = status.status.as_deref().unwrap_or("");
 
-        // If Kraken did not return an order_id, the request was syntactically
-        // valid but Kraken refused to place the order (e.g. insufficientAvailableFunds,
-        // post_order_failed_because_it_would_be_filled, marketSuspended). These are
-        // business-logic rejections, not transport errors — surface as Rejected so
-        // the signal_processor marks the signal with broker_rejected.
+        // Kraken only returns an order_id when the order was actually placed
+        // on the book. If order_id is absent, the request was syntactically
+        // valid but Kraken refused to place the order. Common reasons:
+        //   "insufficientAvailableFunds"
+        //   "post_order_failed_because_it_would_be_filled"
+        //   "marketSuspended" / "priceRejected"
+        // These are business-logic rejections, not transport errors — we
+        // surface them as ExecutionError::Rejected so the signal_processor
+        // can mark the signal with broker_rejected rather than
+        // broker_invalid_response.
         let broker_order_id = match &status.order_id {
             Some(id) => id.clone(),
             None => {

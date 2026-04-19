@@ -832,6 +832,34 @@ impl Database {
         Ok(())
     }
 
+    /// Aggregate realised PnL (in BTC, the settlement currency for
+    /// inverse perpetuals) across every position in a given sleeve —
+    /// open or closed. Used by the equity writer (Drop 12) to
+    /// populate `equity_snapshots.realized_pnl_leverage_lifetime`
+    /// without relying on SQLite's CAST-on-TEXT semantics.
+    ///
+    /// The column is stored as TEXT (rust_decimal via string), so we
+    /// stream the rows and sum in Rust to preserve full precision.
+    pub async fn sum_realized_pnl_btc_by_sleeve(&self, sleeve: &str) -> Result<Decimal> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            r#"SELECT realized_pnl_btc FROM positions WHERE sleeve = ?"#,
+        )
+        .bind(sleeve)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut total = Decimal::ZERO;
+        for (raw,) in rows {
+            let v = Decimal::from_str(&raw).map_err(|e| {
+                crate::PersistenceError::Decimal(
+                    format!("parsing realized_pnl_btc {:?}: {}", raw, e)
+                )
+            })?;
+            total += v;
+        }
+        Ok(total)
+    }
+
     /// Fetch the most recent equity snapshot, or `None` if none exist yet.
     pub async fn latest_equity_snapshot(&self) -> Result<Option<EquitySnapshotRow>> {
         let row = sqlx::query_as::<_, EquitySnapshotRow>(
