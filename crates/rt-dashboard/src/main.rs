@@ -14,17 +14,21 @@
 //! about our tick cadences.
 
 use axum::{
-    extract::State,
-    response::{Html, Json},
+    extract::{Query, State},
+    response::{sse::{Event, KeepAlive, Sse}, Html, Json},
     routing::get,
     Router,
 };
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
+use futures::stream::Stream;
+use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{FromRow, SqlitePool};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::{info, warn};
 
@@ -555,6 +559,104 @@ fn extract_date_from_filename(path: &str) -> Option<String> {
 }
 
 // =========================================================================
+// Live log streaming (Server-Sent Events)
+//
+// Shells out to `journalctl -f -u rt-daemon -u razortrade-signals.service
+//   -u razortrade-backup.service --output=short-iso --no-pager`
+// and streams each line to the browser as an SSE event. The browser's
+// EventSource auto-reconnects if the stream drops, so we don't have to
+// worry about restart logic on our end.
+//
+// We deliberately DON'T use --output=json here — plain short-iso is
+// human-readable, small, and doesn't need client-side parsing for the
+// common case. Heavy parsing would belong in a different endpoint.
+// =========================================================================
+
+#[derive(Deserialize)]
+struct LogsQuery {
+    /// How many historical lines to include before going live. Default 50.
+    #[serde(default = "default_tail")]
+    tail: u32,
+}
+
+fn default_tail() -> u32 {
+    50
+}
+
+async fn logs_stream(
+    State(_): State<AppState>,
+    Query(q): Query<LogsQuery>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    use async_stream::stream;
+
+    let tail = q.tail.min(500); // cap to avoid abuse
+
+    // Spawn journalctl as a subprocess. We watch three units and emit
+    // the last `tail` lines first, then follow live.
+    let stream = stream! {
+        let mut child = match Command::new("journalctl")
+            .args([
+                "--follow",
+                "--no-pager",
+                "--output=short-iso",
+                "-n",
+                &tail.to_string(),
+                "-u", "rt-daemon.service",
+                "-u", "razortrade-signals.service",
+                "-u", "razortrade-backup.service",
+                "-u", "rt-dashboard.service",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "failed to spawn journalctl");
+                yield Ok(Event::default().event("error").data(format!("spawn failed: {}", e)));
+                return;
+            }
+        };
+
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => {
+                yield Ok(Event::default().event("error").data("no stdout on journalctl"));
+                return;
+            }
+        };
+
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    yield Ok(Event::default().data(line));
+                }
+                Ok(None) => {
+                    // journalctl exited; terminate the SSE stream. Client
+                    // will auto-reconnect via EventSource.
+                    break;
+                }
+                Err(e) => {
+                    warn!(error = %e, "reading journalctl output");
+                    break;
+                }
+            }
+        }
+
+        // Best-effort kill. The SSE client disconnecting should trigger
+        // Drop of the stream, which drops `child`, which kills the
+        // subprocess via Tokio's kill_on_drop semantics if enabled; we
+        // don't enable that, so we reap explicitly.
+        let _ = child.kill().await;
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// =========================================================================
 // HTML root
 // =========================================================================
 
@@ -602,6 +704,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/freshness", get(freshness))
         .route("/api/disk", get(disk_usage))
         .route("/api/backup-status", get(backup_status))
+        .route("/api/logs/stream", get(logs_stream))
         .with_state(state);
 
     let bind_addr = std::env::var("RT_DASHBOARD_BIND")

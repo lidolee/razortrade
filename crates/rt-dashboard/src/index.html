@@ -363,6 +363,37 @@
         </div>
       </div>
     </div>
+
+    <div class="grid cols-1" style="margin-top: 16px;">
+      <div class="card">
+        <h2>Live Log
+          <span style="float: right; font-weight: normal; text-transform: none; letter-spacing: 0; font-size: 11px;">
+            <span id="log-status" class="pill dim">connecting…</span>
+            <button id="log-pause" style="background: transparent; border: 1px solid var(--border); color: var(--fg-dim); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-family: var(--mono); font-size: 11px; margin-left: 6px;">pause</button>
+            <button id="log-clear" style="background: transparent; border: 1px solid var(--border); color: var(--fg-dim); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-family: var(--mono); font-size: 11px; margin-left: 4px;">clear</button>
+          </span>
+        </h2>
+        <div id="log-panel" style="
+          background: #050608;
+          border: 1px solid var(--border);
+          border-radius: 6px;
+          padding: 10px 12px;
+          font-family: var(--mono);
+          font-size: 11.5px;
+          line-height: 1.45;
+          height: 420px;
+          overflow-y: auto;
+          white-space: pre-wrap;
+          word-break: break-word;
+        "></div>
+        <div class="footnote" style="margin-top: 8px;">
+          Tailing <code style="font-family: var(--mono);">rt-daemon</code>,
+          <code style="font-family: var(--mono);">razortrade-signals</code>,
+          <code style="font-family: var(--mono);">razortrade-backup</code>,
+          <code style="font-family: var(--mono);">rt-dashboard</code> via <code style="font-family: var(--mono);">journalctl&nbsp;-f</code>.
+        </div>
+      </div>
+    </div>
   </section>
 </main>
 
@@ -754,6 +785,104 @@ async function refreshBackup() {
       </div>`;
   } catch (e) { console.error('backup', e); }
 }
+
+// ============================================================
+// Live log streaming
+// ============================================================
+const logPanel = document.getElementById('log-panel');
+const logStatus = document.getElementById('log-status');
+const logPauseBtn = document.getElementById('log-pause');
+const logClearBtn = document.getElementById('log-clear');
+
+let logPaused = false;
+let logEventSource = null;
+const MAX_LOG_LINES = 500;
+
+// Color a journalctl line based on its level keyword. journalctl
+// --output=short-iso emits lines like:
+//   2026-04-20T00:12:34+0200 razortrade-prod rt-daemon[1234]: <body>
+// The <body> is often JSON with `"level":"INFO"` or similar. We grep
+// cheaply for the literal string.
+function logLineLevel(line) {
+  if (/"level":"ERROR"|\bERROR\b/.test(line)) return 'err';
+  if (/"level":"WARN"|\bWARN\b|\bWARNING\b/.test(line)) return 'warn';
+  if (/"level":"DEBUG"|\bDEBUG\b/.test(line)) return 'dim';
+  return 'default';
+}
+
+const LOG_COLOR = {
+  err:     '#f87171',
+  warn:    '#fbbf24',
+  default: '#e6e9ef',
+  dim:     '#5d6573',
+};
+
+function appendLogLine(line) {
+  if (logPaused) return;
+  const level = logLineLevel(line);
+  const div = document.createElement('div');
+  div.style.color = LOG_COLOR[level];
+  // Compress the journalctl prefix to save horizontal space. We keep
+  // only HH:MM:SS + the unit short name + the body.
+  //   "2026-04-20T00:12:34+0200 razortrade-prod rt-daemon[1234]: …"
+  //   → "00:12:34 rt-daemon: …"
+  const m = line.match(/^(\d{4}-\d{2}-\d{2}T)?(\d{2}:\d{2}:\d{2})[^\s]*\s+\S+\s+(\S+?)\[\d+\]:\s?(.*)$/);
+  if (m) {
+    const timeStr = m[2];
+    const unit = m[3].replace('razortrade-', '').replace('rt-', '');
+    const body = m[4];
+    div.textContent = `${timeStr} ${unit.padEnd(10)} ${body}`;
+  } else {
+    div.textContent = line;
+  }
+  logPanel.appendChild(div);
+  // Trim old lines to keep DOM light.
+  while (logPanel.children.length > MAX_LOG_LINES) {
+    logPanel.removeChild(logPanel.firstChild);
+  }
+  // Auto-scroll only if user is near the bottom; otherwise they're
+  // probably reading older entries and we don't want to yank them back.
+  const nearBottom = logPanel.scrollTop + logPanel.clientHeight >= logPanel.scrollHeight - 40;
+  if (nearBottom) {
+    logPanel.scrollTop = logPanel.scrollHeight;
+  }
+}
+
+function connectLogStream() {
+  if (logEventSource) {
+    try { logEventSource.close(); } catch {}
+  }
+  logStatus.className = 'pill dim';
+  logStatus.textContent = 'connecting…';
+
+  const es = new EventSource('/api/logs/stream?tail=100');
+  logEventSource = es;
+
+  es.onopen = () => {
+    logStatus.className = 'pill ok';
+    logStatus.textContent = 'live';
+  };
+  es.onmessage = (ev) => {
+    appendLogLine(ev.data);
+  };
+  es.addEventListener('error', (ev) => {
+    // EventSource auto-reconnects; we only update status.
+    logStatus.className = 'pill warn';
+    logStatus.textContent = 'reconnecting…';
+  });
+}
+
+logPauseBtn.addEventListener('click', () => {
+  logPaused = !logPaused;
+  logPauseBtn.textContent = logPaused ? 'resume' : 'pause';
+  logPauseBtn.style.color = logPaused ? 'var(--warn)' : 'var(--fg-dim)';
+});
+
+logClearBtn.addEventListener('click', () => {
+  logPanel.innerHTML = '';
+});
+
+connectLogStream();
 
 // ============================================================
 // Refresh scheduler

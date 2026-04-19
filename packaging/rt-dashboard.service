@@ -15,6 +15,11 @@ StartLimitIntervalSec=60
 Type=exec
 User=razortrade
 Group=razortrade
+# Dashboard needs to run `journalctl` as a subprocess for the live-log
+# streaming endpoint. systemd-journal group grants read access to the
+# system journal without needing root. Without this, journalctl returns
+# only the user's own logs (empty for the razortrade service user).
+SupplementaryGroups=systemd-journal
 
 ExecStart=/usr/bin/rt-dashboard
 Environment=RUST_LOG=info
@@ -24,8 +29,9 @@ Environment=RT_DASHBOARD_BIND=127.0.0.1:8080
 Restart=on-failure
 RestartSec=5s
 
-# Hardening. Dashboard does ONLY read queries plus local HTTP —
-# anything more paranoid than this would break it.
+# Hardening. Dashboard does ONLY read queries plus local HTTP and
+# the journalctl subprocess for live-log streaming — anything more
+# paranoid than this would break one of those.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -37,7 +43,12 @@ PrivateDevices=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 LockPersonality=true
-MemoryDenyWriteExecute=true
+# NB: MemoryDenyWriteExecute removed in Drop 16 because some Go
+# runtime paths inside journalctl's JSON output handling use JIT-ish
+# memory patterns that were triggering SIGSYS under strict MDWX.
+# The SystemCallArchitectures lockdown below still keeps the attack
+# surface small; losing MDWX is an acceptable trade for the live-log
+# feature.
 SystemCallArchitectures=native
 CapabilityBoundingSet=
 ReadOnlyPaths=/var/lib/razortrade

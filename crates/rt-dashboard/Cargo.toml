@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-
 [[bin]]
 name = "rt-dashboard"
 path = "src/main.rs"
@@ -18,8 +17,10 @@ sqlx = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-# Not in workspace — inline version
-axum = "0.7"
+# Not in workspace — inline versions
+axum = { version = "0.7", features = ["macros"] }
+futures = "0.3"
+async-stream = "0.3"
 
 [package.metadata.generate-rpm]
 name = "rt-dashboard"
