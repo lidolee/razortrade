@@ -53,14 +53,84 @@ Those require sandbox credentials and live in a separate repository.
 
 ## Local development
 
+The repository ships a `deploy/daemon.toml.local.example` tuned for running
+out of the repo checkout — SQLite in `./var/`, Kraken demo WS, dry-run
+execution mode. To use it:
+
 ```bash
+cp deploy/daemon.toml.local.example deploy/daemon.toml.local
 mkdir -p ./var
-export RT_DAEMON_CONFIG=$(pwd)/deploy/daemon.toml.example
-sed -i 's|/var/lib/razortrade/razortrade.sqlite|./var/razortrade.sqlite|' $RT_DAEMON_CONFIG
-RUST_LOG=debug cargo run -p rt-daemon
+export RT_DAEMON_CONFIG=$(pwd)/deploy/daemon.toml.local
+RUST_LOG=info,rt_=debug,sqlx=warn cargo run -p rt-daemon
 ```
 
-## Production deployment (Hetzner CX32, Rocky Linux 9)
+`daemon.toml.local` is gitignored, so you can edit it freely.
+
+### Phase 3a: end-to-end smoke test
+
+This is the first real proof that the wiring works. You need two
+terminals.
+
+**Terminal 1 — start the daemon:**
+
+```bash
+cd ~/Workspace/razortrade
+cp deploy/daemon.toml.local.example deploy/daemon.toml.local  # once
+mkdir -p ./var                                                 # once
+export RT_DAEMON_CONFIG=$(pwd)/deploy/daemon.toml.local
+RUST_LOG=info,rt_=debug,sqlx=warn cargo run -p rt-daemon
+```
+
+The daemon starts, creates `./var/razortrade.sqlite`, runs all migrations,
+tries to connect to `wss://demo-futures.kraken.com/ws/v1`, and begins
+polling the `signals` table at 1 Hz. Logs are JSON — pipe through `jq`
+in another pane if you want them pretty:
+`journalctl -f | jq` style doesn't apply here; for `cargo run` output
+use `cargo run -p rt-daemon 2>&1 | tee >(jq -R 'fromjson? // .')`.
+
+**Terminal 2 — inject one signal:**
+
+```bash
+cd ~/Workspace/razortrade
+python3 tools/inject_test_signal.py
+```
+
+This writes exactly one row into `signals` with realistic metadata
+(ATR, FX rate, leverage sleeve, BTC perpetual symbol).
+
+**What to expect in Terminal 1 within ~1 second:**
+
+```
+signal processor ... "processing pending signals" count=1
+market snapshot unavailable; signal rejected ... NoBook { symbol: "PI_XBTUSD" }
+```
+
+This rejection is the *expected* outcome: the Kraken demo WS has not
+delivered an orderbook yet at the moment of the first poll. The
+signal is marked rejected with a structured `market_data_unavailable`
+reason. The pipeline ran end-to-end.
+
+**Inspect the database:**
+
+```bash
+sqlite3 ./var/razortrade.sqlite "SELECT id, status, rejection_reason FROM signals;"
+sqlite3 ./var/razortrade.sqlite "SELECT * FROM checklist_evaluations;"
+sqlite3 ./var/razortrade.sqlite "SELECT * FROM dry_run_orders;"
+```
+
+- `signals`: one row, `status = 'rejected'`, `rejection_reason` contains
+  a JSON object with `"kind": "market_data_unavailable"`.
+- `checklist_evaluations`: empty — the checklist never ran because
+  market data was missing.
+- `dry_run_orders`: empty — no intent recorded.
+
+If you leave the daemon running long enough for Kraken to push a book
+snapshot, re-injecting a signal will get further and either land in
+`checklist_evaluations` (rejection) or in `dry_run_orders` (approval).
+Either way, no broker submission happens because the execution mode is
+`dry_run`.
+
+## Production deployment (Hetzner CX32, Rocky Linux 10)
 
 See `docs/RUNBOOK.md` (not yet written). Summary:
 

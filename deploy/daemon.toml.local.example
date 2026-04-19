@@ -1,0 +1,43 @@
+# Local development configuration for razortrade.
+#
+# Copy this to `daemon.toml.local` (which is gitignored) and adjust.
+# To use it:
+#
+#   export RT_DAEMON_CONFIG=$(pwd)/deploy/daemon.toml.local
+#   cargo run -p rt-daemon
+#
+# This config differs from the production `daemon.toml.example` in three
+# ways:
+#
+#   1. The SQLite database lives under `./var/` in the repo, not
+#      `/var/lib/razortrade/`. No root needed.
+#   2. The execution mode is explicitly `dry_run` (same as default, but
+#      written out here so it is visible).
+#   3. The Kraken WS points at the demo host and the daemon runs without
+#      credentials in public-only mode.
+
+database_path = "./var/razortrade.sqlite"
+signal_poll_interval_ms = 1000
+kill_switch_check_interval_secs = 60
+
+[execution]
+# Safety: DO NOT change this locally to "paper" or "live". The broker
+# submission layer is not wired up yet and will reject signals.
+mode = "dry_run"
+
+[kraken]
+products = ["PI_XBTUSD"]
+demo = true
+
+[risk]
+max_tick_age_ms = 500
+max_spread_bps = "20"
+min_book_depth_multiple = "3"
+book_depth_levels = 5
+max_atr_pct_for_leverage = "6"
+max_atr_pct_absolute = "15"
+leverage_kill_switch_budget_chf = "-1000"
+max_portfolio_drawdown = "0.20"
+adverse_move_for_worst_case = "0.10"
+max_leverage = "2"
+max_funding_rate_per_8h = "0.0002"
