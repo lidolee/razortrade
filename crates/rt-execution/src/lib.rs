@@ -103,6 +103,18 @@ pub trait Broker: Send + Sync {
     /// List all open orders. Used for reconciliation after reconnect or restart.
     async fn open_orders(&self) -> Result<Vec<OpenOrderSummary>, ExecutionError>;
 
+    /// Drop 19 CV-6: List all open leverage positions at the broker.
+    /// Used by the periodic reconciler to detect drift between our
+    /// local `positions` table and Kraken reality (e.g. a position
+    /// was manually closed in the Kraken UI, or a fill never reached
+    /// our WebSocket feed).
+    ///
+    /// Default implementation returns empty so brokers that don't yet
+    /// expose positions (paper, mocks) do not need to implement it.
+    async fn open_positions(&self) -> Result<Vec<OpenPositionEntry>, ExecutionError> {
+        Ok(Vec::new())
+    }
+
     /// Best-effort health check: a cheap API call that confirms we can
     /// still talk to the venue and our auth is valid.
     async fn health_check(&self) -> Result<(), ExecutionError>;
@@ -119,4 +131,17 @@ pub struct OpenOrderSummary {
     /// Drop 19 — CV-A1a: echo of the client-generated id so the
     /// reconciliation logic can match back to the local order row.
     pub cli_ord_id: Option<String>,
+}
+
+/// Drop 19 CV-6: minimales Open-Position-Schema für die Reconciler.
+/// `side` folgt der Kraken-Konvention long/short; `signed_quantity`
+/// ist positiv bei long, negativ bei short.
+#[derive(Debug, Clone)]
+pub struct OpenPositionEntry {
+    pub instrument_symbol: String,
+    /// Positive = long, negative = short.
+    pub signed_quantity: Decimal,
+    pub avg_entry_price: Option<Decimal>,
+    pub liquidation_price: Option<Decimal>,
+    pub leverage: Option<Decimal>,
 }

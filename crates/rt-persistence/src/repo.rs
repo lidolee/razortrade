@@ -542,6 +542,29 @@ impl Database {
         Ok(row)
     }
 
+    /// Drop 19 CV-6: alle Orders die aus unserer Sicht noch live sind.
+    /// Der periodic_reconciler vergleicht diese Liste gegen Kraken's
+    /// `/openorders` um Drift zu erkennen (z.B. manuell gecancelte
+    /// Orders oder verlorene Fills).
+    pub async fn list_live_orders(&self) -> Result<Vec<crate::models::OrderRow>> {
+        let rows: Vec<crate::models::OrderRow> = sqlx::query_as(
+            r#"
+            SELECT id, signal_id, broker, broker_order_id, instrument_symbol,
+                   side, order_type, time_in_force, quantity,
+                   limit_price, stop_price, status, filled_quantity,
+                   avg_fill_price, fees_paid, created_at, updated_at,
+                   error_message, cli_ord_id
+              FROM orders
+             WHERE status IN ('submitted', 'acknowledged', 'partially_filled',
+                              'uncertain', 'pending_submission')
+             ORDER BY id DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// Apply a single fill from the broker feed to a tracked order.
     ///
     /// Behaviour:

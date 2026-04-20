@@ -20,6 +20,7 @@
 mod equity_writer;
 mod fill_reconciler;
 mod market_data;
+mod periodic_reconciler;
 mod portfolio_loader;
 mod signal_processor;
 
@@ -319,6 +320,21 @@ async fn main() -> Result<()> {
         })
     };
 
+    // Drop 19 CV-6: periodic REST-Reconciliation gegen Kraken.
+    // Alle 60s ein Listen-Call auf /openorders um WS-Drift zu
+    // detektieren. Nur aktiv wenn ein echter Broker verbunden ist
+    // (Paper/Live, nicht DryRun). Logging-only in Drop 19, automatische
+    // State-Transitions kommen frühestens Drop 20.
+    let periodic_reconciler_handle = kraken_concrete.clone().map(|client| {
+        let db = db.clone();
+        let rx = shutdown_rx.clone();
+        let broker: Arc<dyn Broker> = client as Arc<dyn Broker>;
+        let tick = Duration::from_secs(60);
+        tokio::spawn(async move {
+            periodic_reconciler::run(db, broker, tick, rx).await
+        })
+    });
+
     // Drop 12: periodic equity snapshot writer. Only runs when we
     // have a real broker client (Paper / Live). In DryRun there is
     // nothing to snapshot against.
@@ -339,6 +355,9 @@ async fn main() -> Result<()> {
         let _ = poller_handle.await;
         let _ = supervisor_handle.await;
         let _ = fill_reconciler_handle.await;
+        if let Some(h) = periodic_reconciler_handle {
+            let _ = h.await;
+        }
         if let Some(h) = equity_writer_handle {
             let _ = h.await;
         }
