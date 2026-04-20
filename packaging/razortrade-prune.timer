@@ -1,0 +1,19 @@
+# razortrade equity_snapshots pruner — weekly
+#
+# Sonntag 03:15 UTC. Feuert wenn der Host aktiv ist, sonst beim
+# nächsten Boot (Persistent=true). Off-peak gewählt um DB-I/O
+# nicht mit Signal-Evaluation zu überlappen.
+
+[Unit]
+Description=Weekly prune of razortrade equity_snapshots
+Documentation=file:/usr/share/doc/razortrade/README.md
+Requires=razortrade-prune.service
+
+[Timer]
+OnCalendar=Sun *-*-* 03:15:00 UTC
+RandomizedDelaySec=600
+Persistent=true
+Unit=razortrade-prune.service
+
+[Install]
+WantedBy=timers.target

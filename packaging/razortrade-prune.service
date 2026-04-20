@@ -1,0 +1,40 @@
+# razortrade equity_snapshots pruner — oneshot
+#
+# Weekly prune of equity_snapshots older than 90 days. Runs as root
+# because the SQLite file is owned by razortrade:razortrade (0640)
+# and the VACUUM operation needs an exclusive lock.
+
+[Unit]
+Description=razortrade equity_snapshots retention pruner
+Documentation=file:/usr/share/doc/razortrade/README.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+
+ExecStart=/usr/libexec/razortrade/prune-equity-snapshots.sh
+
+# Das Script macht SQLite I/O auf /var/lib/razortrade — kein Netzwerk,
+# kein /home, kein /tmp. Hardening entsprechend eng.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/razortrade
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+PrivateDevices=true
+
+StandardOutput=journal
+StandardError=journal
