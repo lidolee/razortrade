@@ -54,7 +54,7 @@ pub async fn load_portfolio_state(
     let snap = match latest {
         Some(s) => s,
         None => {
-            db.write_bootstrap_equity_snapshot(&snapshot_at.to_rfc3339())
+            db.write_bootstrap_equity_snapshot(&rt_core::time::canonical_iso(snapshot_at))
                 .await
                 .context("writing bootstrap equity snapshot")?;
             db.latest_equity_snapshot()

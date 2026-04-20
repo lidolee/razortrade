@@ -21,6 +21,7 @@ pub mod order;
 pub mod portfolio;
 pub mod position;
 pub mod signal;
+pub mod time;
 
 pub use execution_mode::ExecutionMode;
 pub use instrument::{AssetClass, Broker, Instrument, Sleeve};

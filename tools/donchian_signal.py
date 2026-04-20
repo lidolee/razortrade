@@ -236,15 +236,31 @@ def write_signal(
         "breakout_lower": str(signal.lower),
         "close_at_signal": str(signal.close),
     }
-    now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    # Drop 19 Part C — G1: einheitliches Timestamp-Format Python↔Rust.
+    # Rust schreibt mit `to_rfc3339()` Nanosekunden-Präzision und `+00:00`
+    # Suffix. Python's isoformat() ohne microseconds liefert `+00:00`
+    # ohne sub-second, was lexikografische Vergleiche am Sekunden-Rand
+    # bricht (z.B. `signals.retry_after_at <= ?` oder `expires_at <= now`).
+    # Wir normalisieren beide Seiten auf **Mikrosekunden + Z-Suffix**:
+    # `"2026-04-20T10:45:00.123456Z"`. Rust setzt dazu `SecondsFormat::Micros`
+    # und true Z-Suffix; Python nutzt isoformat() mit microseconds und
+    # ersetzt `+00:00` durch `Z`.
+    now_utc = datetime.now(timezone.utc)
     # OF-2: signals must expire so a stale breakout is not re-tried
     # forever by the signal_processor retry loop. 30 minutes covers
     # several checklist retry cycles without letting a signal outlive
     # the market context that generated it.
     expires_at_utc = now_utc + timedelta(minutes=30)
 
+    def _iso_micros_z(dt: datetime) -> str:
+        # isoformat(timespec="microseconds") garantiert .NNNNNN, danach
+        # +00:00 → Z ersetzen damit Format identisch mit Rust's
+        # to_rfc3339_opts(SecondsFormat::Micros, true) ist.
+        s = dt.isoformat(timespec="microseconds")
+        return s.replace("+00:00", "Z")
+
     row = {
-        "created_at": now_utc.isoformat(),
+        "created_at": _iso_micros_z(now_utc),
         "instrument_symbol": symbol,
         "side": signal.side,
         "signal_type": SIGNAL_TYPE_TREND_ENTRY,
@@ -253,7 +269,7 @@ def write_signal(
         "leverage": str(leverage),
         "metadata_json": json.dumps(metadata),
         "status": "pending",
-        "expires_at": expires_at_utc.isoformat(),
+        "expires_at": _iso_micros_z(expires_at_utc),
     }
     # CV-3: SQLITE_BUSY on a concurrent writer is otherwise unhandled
     # and kills this script, losing the signal until the next 4h tick.

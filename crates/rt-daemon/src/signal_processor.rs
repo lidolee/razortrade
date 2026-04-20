@@ -117,7 +117,7 @@ impl SignalProcessor {
     }
 
     async fn poll_once(&self) -> anyhow::Result<()> {
-        let now_iso = Utc::now().to_rfc3339();
+        let now_iso = rt_core::time::now_iso();
         let pending = self.db.pending_signals(64, &now_iso).await?;
         if pending.is_empty() {
             return Ok(());
@@ -143,7 +143,7 @@ impl SignalProcessor {
                     "detail": format!("row parsing: {e}")
                 });
                 self.db
-                    .mark_signal_rejected(row.id, &Utc::now().to_rfc3339(), &reason.to_string())
+                    .mark_signal_rejected(row.id, &rt_core::time::now_iso(), &reason.to_string())
                     .await?;
                 return Ok(());
             }
@@ -166,13 +166,13 @@ impl SignalProcessor {
                 );
                 let reason = serde_json::json!({
                     "kind": "signal_expired",
-                    "expires_at": exp.to_rfc3339(),
-                    "now": now.to_rfc3339(),
+                    "expires_at": rt_core::time::canonical_iso(exp),
+                    "now": rt_core::time::canonical_iso(now),
                 });
                 self.db
                     .mark_signal_rejected(
                         signal.id,
-                        &now.to_rfc3339(),
+                        &rt_core::time::canonical_iso(now),
                         &reason.to_string(),
                     )
                     .await?;
@@ -222,7 +222,7 @@ impl SignalProcessor {
                     "detail": e.to_string(),
                 });
                 self.db
-                    .mark_signal_rejected(signal.id, &Utc::now().to_rfc3339(), &reason.to_string())
+                    .mark_signal_rejected(signal.id, &rt_core::time::now_iso(), &reason.to_string())
                     .await?;
                 return Ok(());
             }
@@ -243,7 +243,7 @@ impl SignalProcessor {
         self.db
             .record_checklist_evaluation(
                 signal.id,
-                &result.evaluated_at.to_rfc3339(),
+                &rt_core::time::canonical_iso(result.evaluated_at),
                 result.approved,
                 &outcomes_json,
             )
@@ -266,7 +266,7 @@ impl SignalProcessor {
             self.db
                 .mark_signal_rejected(
                     signal.id,
-                    &Utc::now().to_rfc3339(),
+                    &rt_core::time::now_iso(),
                     &rejection_json.to_string(),
                 )
                 .await?;
@@ -330,7 +330,7 @@ impl SignalProcessor {
                     existing_status = %existing_status,
                     "signal has an in-flight or filled order already; marking processed"
                 );
-                let now_iso = Utc::now().to_rfc3339();
+                let now_iso = rt_core::time::now_iso();
                 self.db.mark_signal_processed(signal.id, &now_iso).await?;
                 self.db.clear_signal_retry_after(signal.id).await?;
                 Ok(UncertainReconcileOutcome::AlreadyReconciled)
@@ -351,7 +351,7 @@ impl SignalProcessor {
                         self.db
                             .mark_signal_rejected(
                                 signal.id,
-                                &Utc::now().to_rfc3339(),
+                                &rt_core::time::now_iso(),
                                 &reason.to_string(),
                             )
                             .await?;
@@ -367,7 +367,7 @@ impl SignalProcessor {
                 );
                 match broker.get_order_by_cli_ord_id(&cli).await {
                     Ok(Some(open)) => {
-                        let now_iso = Utc::now().to_rfc3339();
+                        let now_iso = rt_core::time::now_iso();
                         self.db
                             .backfill_broker_order_id(
                                 existing_order_id,
@@ -404,7 +404,7 @@ impl SignalProcessor {
                             "uncertain-resubmit: broker.get_order_by_cli_ord_id failed; extending cooldown"
                         );
                         let retry_at =
-                            (Utc::now() + chrono::Duration::seconds(90)).to_rfc3339();
+                            rt_core::time::canonical_iso(Utc::now() + chrono::Duration::seconds(90));
                         self.db
                             .set_signal_retry_after(signal.id, &retry_at)
                             .await?;
@@ -462,7 +462,7 @@ impl SignalProcessor {
             self.db
                 .mark_signal_rejected(
                     signal.id,
-                    &Utc::now().to_rfc3339(),
+                    &rt_core::time::now_iso(),
                     &reason.to_string(),
                 )
                 .await?;
@@ -488,7 +488,7 @@ impl SignalProcessor {
                 self.db
                     .mark_signal_rejected(
                         signal.id,
-                        &Utc::now().to_rfc3339(),
+                        &rt_core::time::now_iso(),
                         &reason.to_string(),
                     )
                     .await?;
@@ -523,7 +523,7 @@ impl SignalProcessor {
                 self.db
                     .mark_signal_rejected(
                         signal.id,
-                        &Utc::now().to_rfc3339(),
+                        &rt_core::time::now_iso(),
                         &reason_obj.to_string(),
                     )
                     .await?;
@@ -544,7 +544,7 @@ impl SignalProcessor {
         // instead of inserting a new one. The row's status is still
         // `uncertain` — the broker-call result below will drive it
         // forward.
-        let now_iso = Utc::now().to_rfc3339();
+        let now_iso = rt_core::time::now_iso();
         let order_type_str = enum_to_snake_case(&order.order_type)?;
         let tif_str = enum_to_snake_case(&order.time_in_force)?;
         let side_str = enum_to_snake_case(&order.side)?;
@@ -588,7 +588,7 @@ impl SignalProcessor {
 
         // -- Hand off to the broker --------------------------------------
         let result = broker.submit_order(&order).await;
-        let submit_iso = Utc::now().to_rfc3339();
+        let submit_iso = rt_core::time::now_iso();
 
         match result {
             Ok(sub) => {
@@ -646,7 +646,7 @@ impl SignalProcessor {
                     self.db
                         .mark_order_uncertain(order_id, &err_string, &submit_iso)
                         .await?;
-                    let retry_at = (Utc::now() + chrono::Duration::seconds(90)).to_rfc3339();
+                    let retry_at = rt_core::time::canonical_iso(Utc::now() + chrono::Duration::seconds(90));
                     self.db
                         .set_signal_retry_after(signal.id, &retry_at)
                         .await?;
@@ -703,7 +703,7 @@ impl SignalProcessor {
         self.db
             .record_dry_run_order(
                 signal.id,
-                &Utc::now().to_rfc3339(),
+                &rt_core::time::now_iso(),
                 &signal.instrument_symbol,
                 &side_str,
                 &sleeve_str,
@@ -716,7 +716,7 @@ impl SignalProcessor {
             .await?;
 
         self.db
-            .mark_signal_processed(signal.id, &Utc::now().to_rfc3339())
+            .mark_signal_processed(signal.id, &rt_core::time::now_iso())
             .await?;
         Ok(())
     }
@@ -729,7 +729,7 @@ impl SignalProcessor {
         self.db
             .mark_signal_rejected(
                 signal.id,
-                &Utc::now().to_rfc3339(),
+                &rt_core::time::now_iso(),
                 &reason_json.to_string(),
             )
             .await?;

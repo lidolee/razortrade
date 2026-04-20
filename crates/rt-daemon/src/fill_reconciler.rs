@@ -29,7 +29,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use rt_execution::Broker;
 use rt_kraken_futures::private_state::FillsStore;
 use rt_persistence::Database;
@@ -124,7 +123,7 @@ async fn reconcile_once(
     // Apply in seq order; stop at the first error so we can retry
     // next tick without skipping a fill.
     for fill in snapshot {
-        let now_iso = Utc::now().to_rfc3339();
+        let now_iso = rt_core::time::now_iso();
 
         // Drop 6c: restart-resilient dedup. The in-memory
         // `last_applied_seq` watermark only protects within a single

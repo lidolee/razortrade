@@ -33,7 +33,6 @@
 //! ~3000/day, well within any broker rate budget.
 
 use anyhow::{anyhow, Result};
-use chrono::Utc;
 use rt_kraken_futures::rest::KrakenFuturesRestClient;
 use rt_kraken_futures::ws::TickerStore;
 use rt_persistence::Database;
@@ -213,7 +212,7 @@ async fn write_one_snapshot(
     let drawdown_fraction = Decimal::ZERO;
 
     // ---- 8. Persist ---------------------------------------------
-    let now_iso = Utc::now().to_rfc3339();
+    let now_iso = rt_core::time::now_iso();
     let id = db
         .insert_equity_snapshot(
             &now_iso,

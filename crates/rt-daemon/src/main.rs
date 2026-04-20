@@ -448,7 +448,7 @@ pub(crate) async fn evaluate_kill_switch_once(
 
             let event_id = db
                 .record_kill_switch(
-                    &at.to_rfc3339(),
+                    &rt_core::time::canonical_iso(at),
                     reason_kind,
                     &reason_json,
                     &snapshot_json,
@@ -484,7 +484,7 @@ pub(crate) async fn evaluate_kill_switch_once(
             let snapshot_json = serde_json::to_string(&portfolio)?;
             let event_id = db
                 .record_kill_switch(
-                    &at.to_rfc3339(),
+                    &rt_core::time::canonical_iso(at),
                     reason_kind,
                     &reason_json,
                     &snapshot_json,
