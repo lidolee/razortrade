@@ -282,6 +282,88 @@ def write_signal(
     return signal_id
 
 
+# ---------------------------------------------------------------------------
+# Drop 19 — CV-A1c: pre-write guard against duplicate exposure.
+# ---------------------------------------------------------------------------
+def check_existing_exposure(
+    db_path: str, symbol: str, new_side: str
+) -> str | None:
+    """Return a human-readable reason string if the daemon already has an
+    open position or an in-flight order on `symbol` in the same direction
+    as `new_side`. Return None if it is safe to write a new signal.
+
+    `new_side` is expected to be "buy" or "sell" (as produced by
+    `detect_breakout`).
+
+    The function uses its own short-lived SQLite connection so it does
+    not interfere with `write_signal`'s transaction.
+    """
+    if new_side not in ("buy", "sell"):
+        raise ValueError(f"unexpected side {new_side!r}; want buy or sell")
+
+    conn = sqlite3.connect(db_path, timeout=30.0)
+    try:
+        conn.execute("PRAGMA busy_timeout = 30000")
+
+        # --- Open positions: sign of quantity is direction --------------
+        # positions.quantity is stored as a TEXT Decimal. We compare
+        # numerically via CAST. Zero-quantity rows with closed_at=NULL
+        # can exist briefly after a full-reduce fill but before the
+        # daemon flips closed_at; we treat those as already-closed.
+        cur = conn.execute(
+            """
+            SELECT quantity
+              FROM positions
+             WHERE instrument_symbol = ?
+               AND closed_at IS NULL
+               AND sleeve = 'crypto_leverage'
+               AND CAST(quantity AS REAL) != 0
+            """,
+            (symbol,),
+        )
+        for (qty_str,) in cur.fetchall():
+            try:
+                qty = Decimal(qty_str)
+            except Exception:
+                # Malformed row: do not trust either way. Be safe and
+                # refuse to write — operator will notice.
+                return (
+                    f"open position row on {symbol} has malformed quantity "
+                    f"{qty_str!r}; cannot safely compare direction"
+                )
+            is_long = qty > 0
+            want_long = new_side == "buy"
+            if is_long == want_long:
+                return (
+                    f"open {symbol} position in same direction "
+                    f"(quantity={qty_str}, new_side={new_side})"
+                )
+
+        # --- In-flight orders: status not yet terminal ------------------
+        cur = conn.execute(
+            """
+            SELECT id, side, status
+              FROM orders
+             WHERE instrument_symbol = ?
+               AND status IN ('pending_submission', 'uncertain',
+                              'acknowledged', 'submitted',
+                              'partially_filled')
+            """,
+            (symbol,),
+        )
+        for (order_id, order_side, order_status) in cur.fetchall():
+            if order_side == new_side:
+                return (
+                    f"in-flight order id={order_id} on {symbol} "
+                    f"side={order_side} status={order_status}"
+                )
+
+        return None
+    finally:
+        conn.close()
+# ---------------------------------------------------------------------------
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Donchian-breakout signal generator for razortrade",
@@ -372,6 +454,41 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 4
+
+    # Drop 19 — CV-A1c: pre-write guard against doubled exposure.
+    #
+    # The Rust side also refuses a duplicate via the DuplicatePositionCheck
+    # pre-trade check, but refusing *here* keeps the signals table clean
+    # (no `rejected: duplicate_position` rows cluttering the audit log
+    # every 4h during a persistent-trend regime) and makes reasoning
+    # about state easier: if the signal exists in the DB at all, it was
+    # at least admissible at write time.
+    #
+    # We bail out on a match on either:
+    #   * an open position (`positions.closed_at IS NULL`) on the same
+    #     symbol with the same direction, OR
+    #   * an in-flight order (`orders.status IN
+    #       ('pending_submission','uncertain','acknowledged',
+    #        'submitted','partially_filled')`)
+    #     on the same symbol with the same direction.
+    #
+    # Direction on a position is the sign of `quantity`; on an order
+    # it's the textual `side` column. Both are checked.
+    try:
+        dup_reason = check_existing_exposure(args.db, args.symbol, breakout.side)
+    except sqlite3.Error as e:
+        print(
+            f"ERROR: pre-write duplicate check failed: {e}",
+            file=sys.stderr,
+        )
+        return 5
+    if dup_reason is not None:
+        print(
+            f"[donchian] REFUSED to write signal: {dup_reason}. "
+            f"Waiting for existing exposure to resolve before next tick.",
+            file=sys.stderr,
+        )
+        return 0
 
     try:
         signal_id = write_signal(

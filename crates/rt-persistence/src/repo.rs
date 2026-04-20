@@ -53,18 +53,32 @@ impl Database {
     }
 
     /// Fetch all signals awaiting processing, oldest first.
-    pub async fn pending_signals(&self, limit: i64) -> Result<Vec<SignalRow>> {
+    ///
+    /// Drop 19 — CV-A1: Signale mit einem gesetzten `retry_after_at`
+    /// werden erst nach Ablauf des Cooldowns zurückgegeben. Das
+    /// verhindert, dass ein Signal, dessen Order in `uncertain` steht,
+    /// in einer Polling-Schleife re-submittet wird bevor der
+    /// Fill-Reconciler Chancen hatte den Status über den Orphan-Catcher
+    /// auf `acknowledged` zu heben. `now_iso` ist der aktuelle Zeitpunkt
+    /// als RFC3339 — Lexikographischer Vergleich auf UTC-ISO ist safe.
+    pub async fn pending_signals(
+        &self,
+        limit: i64,
+        now_iso: &str,
+    ) -> Result<Vec<SignalRow>> {
         let rows = sqlx::query_as::<_, SignalRow>(
             r#"
             SELECT id, created_at, instrument_symbol, side, signal_type, sleeve,
                    notional_chf, leverage, metadata_json, status, processed_at,
-                   rejection_reason, expires_at
+                   rejection_reason, expires_at, retry_after_at
             FROM signals
             WHERE status = 'pending'
+              AND (retry_after_at IS NULL OR retry_after_at <= ?)
             ORDER BY created_at ASC
             LIMIT ?
             "#,
         )
+        .bind(now_iso)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -346,6 +360,15 @@ impl Database {
     /// knows (by cli_ord_id) but never persisted the broker id for —
     /// because the REST submit response was lost to a network error.
     /// The WS fill feed delivers the broker_order_id, closing the gap.
+    ///
+    /// Drop 19 — CV-A1b: the status transition now also promotes
+    /// `uncertain` orders (those that the daemon explicitly flagged
+    /// as "timeout, outcome unknown") into `acknowledged`, because the
+    /// arrival of a fill for this cli_ord_id proves Kraken accepted
+    /// the order. Without this, an `uncertain` order would keep its
+    /// label forever even after the fill is correctly applied, and the
+    /// dashboard / audit trail would stay inconsistent with the
+    /// actual position state.
     pub async fn backfill_broker_order_id(
         &self,
         order_id: i64,
@@ -357,7 +380,7 @@ impl Database {
             UPDATE orders
                SET broker_order_id = ?,
                    status = CASE
-                       WHEN status = 'pending_submission'
+                       WHEN status IN ('pending_submission', 'uncertain')
                        THEN 'acknowledged' ELSE status END,
                    updated_at = ?
              WHERE id = ?
@@ -423,6 +446,100 @@ impl Database {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Drop 19 — CV-A1a: mark an order as `uncertain`.
+    ///
+    /// Semantically different from `failed`: the REST submit timed out
+    /// (or hit a transient network error), so the broker-side state is
+    /// genuinely unknown. Kraken may have placed the order or may not
+    /// have. Subsequent reconciliation via `backfill_broker_order_id`
+    /// (on orphan fill) or an explicit REST `get_order_by_cli_ord_id`
+    /// lookup will resolve the state.
+    ///
+    /// Until then, the processor must not re-submit on this signal —
+    /// signal_processor sets `retry_after_at` on the signal to gate the
+    /// resubmit path.
+    pub async fn mark_order_uncertain(
+        &self,
+        order_id: i64,
+        error_message: &str,
+        updated_at_iso: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE orders
+               SET status = 'uncertain',
+                   error_message = ?,
+                   updated_at = ?
+             WHERE id = ?
+            "#,
+        )
+        .bind(error_message)
+        .bind(updated_at_iso)
+        .bind(order_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Drop 19 — CV-A1a: set a cooldown on a signal.
+    ///
+    /// While `retry_after_at > now`, `pending_signals` will not return
+    /// the signal. After the cooldown expires, the processor may
+    /// reconsider it. Signal status stays `pending` throughout so we
+    /// do not confuse the cooldown with a terminal outcome.
+    pub async fn set_signal_retry_after(
+        &self,
+        signal_id: i64,
+        retry_after_iso: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE signals SET retry_after_at = ? WHERE id = ?",
+        )
+        .bind(retry_after_iso)
+        .bind(signal_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Drop 19 — CV-A1a: clear the cooldown on a signal, typically
+    /// after a successful reconciliation or an explicit resubmit.
+    pub async fn clear_signal_retry_after(&self, signal_id: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE signals SET retry_after_at = NULL WHERE id = ?",
+        )
+        .bind(signal_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Drop 19 — CV-A1a: fetch the pending order belonging to a signal
+    /// (at most one — orders and signals are 1:1 in the current design).
+    /// Used by the processor to find an `uncertain` order before
+    /// deciding whether to resubmit or reconcile.
+    pub async fn pending_order_for_signal(
+        &self,
+        signal_id: i64,
+    ) -> Result<Option<(i64, String, Option<String>)>> {
+        let row: Option<(i64, String, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT id, status, cli_ord_id
+              FROM orders
+             WHERE signal_id = ?
+               AND status IN ('pending_submission', 'uncertain',
+                              'acknowledged', 'submitted',
+                              'partially_filled')
+             ORDER BY id DESC
+             LIMIT 1
+            "#,
+        )
+        .bind(signal_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
     }
 
     /// Apply a single fill from the broker feed to a tracked order.

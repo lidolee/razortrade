@@ -32,7 +32,7 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use rt_core::instrument::Sleeve;
-use rt_core::portfolio::{PortfolioState, SleeveState};
+use rt_core::portfolio::{OpenPositionSummary, PortfolioState, SleeveState};
 use rt_persistence::models::EquitySnapshotRow;
 use rt_persistence::Database;
 use rust_decimal::Decimal;
@@ -68,12 +68,46 @@ pub async fn load_portfolio_state(
         .await
         .context("checking kill-switch state")?;
 
-    let state = materialise(&snap, snapshot_at, kill_switch_active)?;
+    // Drop 19 — CV-A1d: load open positions for the duplicate-position
+    // pre-trade check. We reuse the existing list_open_leverage_positions
+    // helper; it returns (symbol, broker, sleeve, qty_str) tuples for
+    // every row in `positions` with `closed_at IS NULL`.
+    let raw_positions = db
+        .list_open_leverage_positions()
+        .await
+        .context("listing open positions")?;
+    let mut open_positions: Vec<OpenPositionSummary> =
+        Vec::with_capacity(raw_positions.len());
+    for (symbol, _broker, sleeve_str, qty_str) in raw_positions {
+        let qty = Decimal::from_str(&qty_str).map_err(|e| {
+            anyhow!("parsing position quantity {:?}: {}", qty_str, e)
+        })?;
+        let sleeve = match sleeve_str.as_str() {
+            "crypto_leverage" => Sleeve::CryptoLeverage,
+            "crypto_spot" => Sleeve::CryptoSpot,
+            "etf" => Sleeve::Etf,
+            other => {
+                return Err(anyhow!(
+                    "unknown sleeve {:?} on open position for {}",
+                    other,
+                    symbol
+                ))
+            }
+        };
+        open_positions.push(OpenPositionSummary {
+            instrument_symbol: symbol,
+            sleeve,
+            quantity: qty,
+        });
+    }
+
+    let state = materialise(&snap, snapshot_at, kill_switch_active, open_positions)?;
     debug!(
         nav_per_unit = %state.nav_per_unit,
         nav_hwm = %state.nav_hwm_per_unit,
         total_units = %state.total_units,
         kill_switch = kill_switch_active,
+        open_positions = state.open_positions.len(),
         "portfolio state loaded from snapshot"
     );
     Ok(state)
@@ -83,6 +117,7 @@ fn materialise(
     snap: &EquitySnapshotRow,
     snapshot_at: DateTime<Utc>,
     kill_switch_active: bool,
+    open_positions: Vec<rt_core::portfolio::OpenPositionSummary>,
 ) -> Result<PortfolioState> {
     let crypto_spot_value = decimal(&snap.crypto_spot_value_chf, "crypto_spot_value_chf")?;
     let etf_value = decimal(&snap.etf_value_chf, "etf_value_chf")?;
@@ -135,6 +170,7 @@ fn materialise(
         nav_hwm_per_unit,
         total_units,
         kill_switch_active,
+        open_positions,
     })
 }
 
@@ -169,7 +205,7 @@ mod tests {
     fn materialise_maps_fields_correctly() {
         let snap = sample_row();
         let now = Utc::now();
-        let state = materialise(&snap, now, false).unwrap();
+        let state = materialise(&snap, now, false, Vec::new()).unwrap();
 
         assert_eq!(state.nav_per_unit, Decimal::new(15, 1));
         assert_eq!(state.nav_hwm_per_unit, Decimal::new(16, 1));
@@ -191,7 +227,7 @@ mod tests {
     #[test]
     fn materialise_propagates_kill_switch() {
         let snap = sample_row();
-        let state = materialise(&snap, Utc::now(), true).unwrap();
+        let state = materialise(&snap, Utc::now(), true, Vec::new()).unwrap();
         assert!(state.kill_switch_active);
     }
 
@@ -199,7 +235,7 @@ mod tests {
     fn malformed_decimal_is_hard_error() {
         let mut snap = sample_row();
         snap.nav_per_unit = "not-a-number".to_string();
-        let err = materialise(&snap, Utc::now(), false).unwrap_err();
+        let err = materialise(&snap, Utc::now(), false, Vec::new()).unwrap_err();
         assert!(err.to_string().contains("nav_per_unit"));
     }
 }

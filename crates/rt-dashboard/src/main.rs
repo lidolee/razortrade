@@ -15,6 +15,7 @@
 
 use axum::{
     extract::{Query, State},
+    http::HeaderMap,
     response::{sse::{Event, KeepAlive, Sse}, Html, Json},
     routing::get,
     Router,
@@ -657,13 +658,494 @@ async fn logs_stream(
 }
 
 // =========================================================================
+// Drop 18B — Widget endpoints
+// =========================================================================
+
+/// GET /api/user
+///
+/// Returns the currently authenticated user's email and display name,
+/// extracted from the trusted headers injected by oauth2-proxy.
+///
+/// Header provenance: `pass_user_headers=true` + `set_xauthrequest=true`
+/// in oauth2-proxy.cfg causes the proxy to set `X-Forwarded-Email`,
+/// `X-Forwarded-User`, and `X-Forwarded-Preferred-Username` on every
+/// upstream request. These are trusted because the rt-dashboard binary
+/// listens on 127.0.0.1 only and there is no path into it that bypasses
+/// oauth2-proxy.
+#[derive(Serialize, Default)]
+struct UserInfo {
+    email: Option<String>,
+    name: Option<String>,
+    user: Option<String>,
+}
+
+fn header_string(h: &HeaderMap, name: &str) -> Option<String> {
+    h.get(name).and_then(|v| v.to_str().ok()).map(|s| s.to_string())
+}
+
+async fn user_info(headers: HeaderMap) -> Json<UserInfo> {
+    Json(UserInfo {
+        email: header_string(&headers, "x-auth-request-email"),
+        // Google's preferred_username is the human-facing display name
+        // when present (for workspace accounts) or the email local-part
+        // otherwise. We surface it as `name` but fall back to the
+        // username at render time on the frontend.
+        name: header_string(&headers, "x-auth-request-preferred-username"),
+        user: header_string(&headers, "x-auth-request-user"),
+    })
+}
+
+/// GET /api/kill-switch
+///
+/// Returns the current kill-switch state:
+///   - armed (no unresolved events, healthy)
+///   - soft_triggered (realised budget exhausted OR nav drawdown)
+///   - hard_triggered (effective P&L past hard threshold, panic-close
+///     has fired)
+/// plus the latest unresolved event detail (for the UI to show the
+/// operator what happened).
+#[derive(Serialize, FromRow)]
+struct KillSwitchEventRow {
+    id: i64,
+    triggered_at: String,
+    reason_kind: String,
+    reason_detail_json: String,
+    resolved_at: Option<String>,
+}
+
+#[derive(Serialize)]
+struct KillSwitchStateResponse {
+    /// "armed" | "soft_triggered" | "hard_triggered"
+    state: String,
+    /// The unresolved event if any, oldest-first wins the read.
+    active_event: Option<KillSwitchEventRow>,
+    /// Last N events (resolved + unresolved, newest first).
+    recent_events: Vec<KillSwitchEventRow>,
+}
+
+async fn kill_switch_state(
+    State(state): State<AppState>,
+) -> Json<KillSwitchStateResponse> {
+    let active: Option<KillSwitchEventRow> = sqlx::query_as(
+        r#"
+        SELECT id, triggered_at, reason_kind, reason_detail_json, resolved_at
+          FROM kill_switch_events
+         WHERE resolved_at IS NULL
+         ORDER BY triggered_at ASC
+         LIMIT 1
+        "#,
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "kill_switch active query failed");
+        None
+    });
+
+    let recent: Vec<KillSwitchEventRow> = sqlx::query_as(
+        r#"
+        SELECT id, triggered_at, reason_kind, reason_detail_json, resolved_at
+          FROM kill_switch_events
+         ORDER BY triggered_at DESC
+         LIMIT 10
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "kill_switch recent query failed");
+        Vec::new()
+    });
+
+    let kind = active.as_ref().map(|e| e.reason_kind.as_str()).unwrap_or("");
+    let state_label = if active.is_none() {
+        "armed"
+    } else if kind.starts_with("hard_") {
+        "hard_triggered"
+    } else {
+        "soft_triggered"
+    };
+
+    Json(KillSwitchStateResponse {
+        state: state_label.to_string(),
+        active_event: active,
+        recent_events: recent,
+    })
+}
+
+/// GET /api/event-timeline
+///
+/// Unified chronological feed of operationally interesting events:
+///   - signals (created)
+///   - orders (submitted, filled, closed_externally)
+///   - applied_fills (reconciled)
+///   - kill_switch_events (triggered, resolved)
+///
+/// All normalised to `{ at, kind, summary, severity }` so the frontend
+/// can render them identically.
+#[derive(Serialize)]
+struct TimelineEntry {
+    at: String,
+    kind: String,
+    summary: String,
+    /// "info" | "ok" | "warn" | "err"
+    severity: String,
+}
+
+async fn event_timeline(
+    State(state): State<AppState>,
+) -> Json<Vec<TimelineEntry>> {
+    let mut entries: Vec<TimelineEntry> = Vec::new();
+
+    // Signals (last 20). Status drives severity.
+    if let Ok(rows) = sqlx::query_as::<_, (String, String, String, String)>(
+        r#"
+        SELECT created_at, instrument_symbol, signal_type, status
+          FROM signals
+         ORDER BY created_at DESC
+         LIMIT 20
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        for (at, sym, sig_type, status) in rows {
+            let sev = match status.as_str() {
+                "approved" | "processed" => "ok",
+                "rejected" => "warn",
+                "expired" => "warn",
+                _ => "info",
+            };
+            entries.push(TimelineEntry {
+                at,
+                kind: "signal".into(),
+                summary: format!("{sym} · {sig_type} · {status}"),
+                severity: sev.into(),
+            });
+        }
+    }
+
+    // Orders (last 20). Status drives severity.
+    if let Ok(rows) = sqlx::query_as::<_, (String, String, String, String, String)>(
+        r#"
+        SELECT created_at, instrument_symbol, side, status, quantity
+          FROM orders
+         ORDER BY created_at DESC
+         LIMIT 20
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        for (at, sym, side, status, qty) in rows {
+            let sev = match status.as_str() {
+                "filled" => "ok",
+                "rejected" | "failed" | "closed_externally" => "warn",
+                "cancelled" => "info",
+                _ => "info",
+            };
+            entries.push(TimelineEntry {
+                at,
+                kind: "order".into(),
+                summary: format!("{sym} · {side} {qty} · {status}"),
+                severity: sev.into(),
+            });
+        }
+    }
+
+    // Kill-switch events.
+    if let Ok(rows) = sqlx::query_as::<_, (String, String, Option<String>)>(
+        r#"
+        SELECT triggered_at, reason_kind, resolved_at
+          FROM kill_switch_events
+         ORDER BY triggered_at DESC
+         LIMIT 20
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        for (at, kind, resolved) in rows {
+            let sev = if resolved.is_some() { "info" } else { "err" };
+            let summary = if resolved.is_some() {
+                format!("{kind} · resolved")
+            } else {
+                format!("{kind} · active")
+            };
+            entries.push(TimelineEntry {
+                at,
+                kind: "kill_switch".into(),
+                summary,
+                severity: sev.into(),
+            });
+        }
+    }
+
+    // Sort newest first, cap at 50.
+    entries.sort_by(|a, b| b.at.cmp(&a.at));
+    entries.truncate(50);
+
+    Json(entries)
+}
+
+/// GET /api/fill-stats
+///
+/// Drop-18 health metrics. These are extracted from the daemon's
+/// journal via `journalctl --no-pager --since "24 hours ago"` and
+/// counted by grep. The log stream itself is structured JSON so we
+/// count the `message` field values via a fixed set of probes.
+///
+/// The reason we shell out rather than instrument the daemon directly
+/// is that rt-dashboard runs as a separate user (read-only DB access)
+/// and adding a shared metrics channel for a low-volume counter would
+/// be over-engineering.
+#[derive(Serialize, Default)]
+struct FillStats {
+    applied_fills_24h: i64,
+    orphan_catcher_24h: i64,
+    unknown_order_warnings_24h: i64,
+    ws_deser_failures_24h: i64,
+    ws_reconnects_24h: i64,
+    applied_fills_total: i64,
+}
+
+async fn fill_stats(State(state): State<AppState>) -> Json<FillStats> {
+    // Total from DB (cheap).
+    let total: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM applied_fills",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or((0,));
+
+    // The rest comes from journalctl. Running a single journalctl
+    // invocation with a grep is cheap because `--since 24 hours ago`
+    // bounds the work. We parse stdout line-counts per pattern.
+    async fn count_journal_lines(pattern: &str) -> i64 {
+        let out = Command::new("journalctl")
+            .args([
+                "-u", "rt-daemon",
+                "--since", "24 hours ago",
+                "--no-pager",
+                "--output=cat",
+                "-g", pattern,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .await;
+        match out {
+            Ok(o) if o.status.success() => {
+                o.stdout.iter().filter(|&&b| b == b'\n').count() as i64
+            }
+            _ => 0,
+        }
+    }
+
+    // These patterns match log *messages* emitted by the daemon.
+    let applied = count_journal_lines(r#""fill applied to order""#).await;
+    let orphan = count_journal_lines(r"orphan-catcher: matched fill").await;
+    let unknown = count_journal_lines(
+        r#""fill received for unknown order""#,
+    ).await;
+    let deser = count_journal_lines(
+        r"WS message did not match any known variant",
+    ).await;
+    let reconnect = count_journal_lines(
+        r"connection lost",
+    ).await;
+
+    Json(FillStats {
+        applied_fills_24h: applied,
+        orphan_catcher_24h: orphan,
+        unknown_order_warnings_24h: unknown,
+        ws_deser_failures_24h: deser,
+        ws_reconnects_24h: reconnect,
+        applied_fills_total: total.0,
+    })
+}
+
+// =========================================================================
+// Turn 4 — additional dashboard endpoints
+// =========================================================================
+
+/// GET /api/trade-pipeline
+///
+/// Returns recent signals alongside any orders that plausibly came
+/// from them. This implementation deliberately does NOT rely on a
+/// `signal_id` foreign key on the orders table, because that column's
+/// existence has not been verified against the live schema. Instead,
+/// it joins on a time-proximity window plus instrument and side:
+/// an order created within 120 s of a signal on the same instrument
+/// and side is treated as belonging to that signal.
+///
+/// This is **approximate** but safe — the alternative would be to
+/// guess at a column name and crash the endpoint on schema mismatch.
+/// If the daemon later gains a hard signal_id foreign key we'll
+/// replace this with an exact join.
+#[derive(Serialize, FromRow)]
+struct PipelineOrder {
+    id: i64,
+    side: String,
+    status: String,
+    quantity: Option<String>,
+    filled_quantity: Option<String>,
+    avg_fill_price: Option<String>,
+    created_at: String,
+}
+#[derive(Serialize)]
+struct PipelineSignal {
+    id: i64,
+    created_at: String,
+    instrument_symbol: String,
+    side: String,
+    signal_type: String,
+    status: String,
+    expires_at: Option<String>,
+    rejection_reason: Option<String>,
+    orders: Vec<PipelineOrder>,
+}
+
+async fn trade_pipeline(
+    State(state): State<AppState>,
+) -> Json<Vec<PipelineSignal>> {
+    // Pull last 15 signals. A signal may have 0 orders (rejected,
+    // expired) or 1+ orders (approved, one per broker submit).
+    let signals: Vec<(i64, String, String, String, String, String, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            r#"
+            SELECT id, created_at, instrument_symbol, side, signal_type,
+                   status, expires_at, rejection_reason
+              FROM signals
+             ORDER BY id DESC
+             LIMIT 15
+            "#,
+        )
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_else(|e| {
+            warn!(error = %e, "pipeline signals query failed");
+            Vec::new()
+        });
+
+    let mut out: Vec<PipelineSignal> = Vec::with_capacity(signals.len());
+    for (id, created_at, instrument_symbol, side, signal_type, status, expires_at, rejection_reason) in signals {
+        // Approximate link to downstream orders: same instrument, same side,
+        // within -10s / +120s of signal creation. Uses only columns
+        // confirmed in recent_orders handler.
+        let orders: Vec<PipelineOrder> = sqlx::query_as(
+            r#"
+            SELECT id, side, status, quantity, filled_quantity,
+                   avg_fill_price, created_at
+              FROM orders
+             WHERE instrument_symbol = ?
+               AND side = ?
+               AND created_at BETWEEN
+                   datetime(?, '-10 seconds')
+                   AND datetime(?, '+120 seconds')
+             ORDER BY id ASC
+            "#,
+        )
+        .bind(&instrument_symbol)
+        .bind(&side)
+        .bind(&created_at)
+        .bind(&created_at)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_else(|e| {
+            warn!(error = %e, signal_id = id, "pipeline orders query failed");
+            Vec::new()
+        });
+
+        out.push(PipelineSignal {
+            id,
+            created_at,
+            instrument_symbol,
+            side,
+            signal_type,
+            status,
+            expires_at,
+            rejection_reason,
+            orders,
+        });
+    }
+
+    Json(out)
+}
+
+/// GET /api/signal-stats
+///
+/// Aggregates of the signals table: how many pending/approved/rejected/
+/// processed/expired overall and for the last 24h. Used by the
+/// success-rate widget.
+#[derive(Serialize, Default, FromRow)]
+struct SignalStats {
+    total: i64,
+    approved: i64,
+    rejected: i64,
+    processed: i64,
+    expired: i64,
+    pending: i64,
+    last_24h_total: i64,
+    last_24h_approved: i64,
+    last_24h_rejected: i64,
+}
+
+async fn signal_stats(State(state): State<AppState>) -> Json<SignalStats> {
+    // One row with all counts. Cheaper than eight queries.
+    let row: Option<SignalStats> = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*)                                                           AS total,
+            SUM(CASE WHEN status = 'approved'  THEN 1 ELSE 0 END)              AS approved,
+            SUM(CASE WHEN status = 'rejected'  THEN 1 ELSE 0 END)              AS rejected,
+            SUM(CASE WHEN status = 'processed' THEN 1 ELSE 0 END)              AS processed,
+            SUM(CASE WHEN status = 'expired'   THEN 1 ELSE 0 END)              AS expired,
+            SUM(CASE WHEN status = 'pending'   THEN 1 ELSE 0 END)              AS pending,
+            SUM(CASE WHEN created_at >= datetime('now','-24 hours') THEN 1 ELSE 0 END)                                      AS last_24h_total,
+            SUM(CASE WHEN created_at >= datetime('now','-24 hours') AND status = 'approved' THEN 1 ELSE 0 END)              AS last_24h_approved,
+            SUM(CASE WHEN created_at >= datetime('now','-24 hours') AND status = 'rejected' THEN 1 ELSE 0 END)              AS last_24h_rejected
+          FROM signals
+        "#,
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or_else(|e| {
+        warn!(error = %e, "signal_stats query failed");
+        None
+    });
+
+    Json(row.unwrap_or_default())
+}
+
+// =========================================================================
 // HTML root
 // =========================================================================
 
 const INDEX_HTML: &str = include_str!("index.html");
+const LOGO_DARK:  &[u8] = include_bytes!("assets/logo-dark.svg");
+const LOGO_LIGHT: &[u8] = include_bytes!("assets/logo-light.svg");
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+async fn logo_dark() -> ([(axum::http::HeaderName, &'static str); 2], &'static [u8]) {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/svg+xml"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        LOGO_DARK,
+    )
+}
+async fn logo_light() -> ([(axum::http::HeaderName, &'static str); 2], &'static [u8]) {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/svg+xml"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        LOGO_LIGHT,
+    )
 }
 
 // =========================================================================
@@ -694,6 +1176,8 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/", get(index))
+        .route("/assets/logo-dark.svg", get(logo_dark))
+        .route("/assets/logo-light.svg", get(logo_light))
         .route("/api/summary", get(summary))
         .route("/api/positions", get(positions))
         .route("/api/equity-history", get(equity_history))
@@ -705,6 +1189,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/disk", get(disk_usage))
         .route("/api/backup-status", get(backup_status))
         .route("/api/logs/stream", get(logs_stream))
+        .route("/api/user", get(user_info))
+        .route("/api/kill-switch", get(kill_switch_state))
+        .route("/api/event-timeline", get(event_timeline))
+        .route("/api/fill-stats", get(fill_stats))
+        .route("/api/trade-pipeline", get(trade_pipeline))
+        .route("/api/signal-stats", get(signal_stats))
         .with_state(state);
 
     let bind_addr = std::env::var("RT_DASHBOARD_BIND")

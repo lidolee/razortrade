@@ -1,325 +1,1192 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <title>razortrade</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+
+<!-- Pre-theme: read stored preference before paint to avoid flash of wrong theme -->
+<script>
+(function() {
+  try {
+    var t = localStorage.getItem('rt-theme') || 'dark';
+    document.documentElement.setAttribute('data-theme', t);
+  } catch (e) {}
+})();
+</script>
+
+<!-- Fonts: Red Hat Display for headings/labels (Extra Bold, uppercase),
+     JetBrains Mono for the log panel only, and a local 'Rleud' font
+     (user-provided, not loaded here) for all body text and numbers.
+     Rleud falls back to the system sans-serif if the user's machine
+     does not have it installed. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Red+Hat+Display:wght@800;900&display=swap" rel="stylesheet">
+
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+
 <style>
-  :root {
-    --bg: #0b0d10;
-    --bg-card: #13161b;
-    --bg-card-hover: #1a1e25;
-    --border: #232831;
-    --fg: #e6e9ef;
-    --fg-dim: #8a93a4;
-    --fg-muted: #5d6573;
-    --accent: #6aa9ff;
-    --ok: #4ade80;
-    --warn: #fbbf24;
-    --err: #f87171;
-    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: var(--bg);
-    color: var(--fg);
-    font-size: 14px;
-    line-height: 1.4;
-  }
-  header {
-    display: flex;
-    align-items: center;
-    padding: 14px 24px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-card);
-  }
-  header h1 {
-    margin: 0;
-    font-size: 16px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-  }
-  header .brand-dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--ok);
-    margin-right: 10px;
-    vertical-align: middle;
-  }
-  nav {
-    display: flex;
-    gap: 4px;
-    margin-left: 32px;
-  }
-  nav button {
-    background: transparent;
-    color: var(--fg-dim);
-    border: 0;
-    padding: 8px 14px;
-    cursor: pointer;
-    font-size: 14px;
-    border-radius: 6px;
-    font-family: inherit;
-  }
-  nav button:hover { background: var(--bg-card-hover); color: var(--fg); }
-  nav button.active { background: var(--bg-card-hover); color: var(--fg); }
-  .spacer { flex: 1; }
-  .user-badge {
-    font-size: 12px;
-    color: var(--fg-muted);
-    font-family: var(--mono);
-  }
-  main {
-    padding: 24px;
-    max-width: 1400px;
-    margin: 0 auto;
-  }
-  .tab { display: none; }
-  .tab.active { display: block; }
+/* =========================================================================
+   Design tokens — Swiss-neutral, luxurious, minimal.
+   Two themes: dark (default) + light. Both use the same semantic tokens.
+   ========================================================================= */
 
-  /* Cards + grid */
-  .grid {
-    display: grid;
-    gap: 16px;
-  }
-  .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  @media (max-width: 900px) {
-    .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: 1fr; }
-  }
-  .card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 16px 18px;
-  }
-  .card h2 {
-    margin: 0 0 12px 0;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--fg-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-  .card.span-2 { grid-column: span 2; }
-  @media (max-width: 900px) { .card.span-2 { grid-column: auto; } }
+:root[data-theme="dark"] {
+  --bg:             #0a0b0d;
+  --bg-elev-1:      #111316;
+  --bg-elev-2:      #16191e;
+  --bg-inset:       #06070a;
+  --border:         #1f232a;
+  --border-strong:  #2b3038;
+  --fg:             #eceef2;
+  --fg-dim:         #8b93a1;
+  --fg-muted:       #5a6170;
+  --accent:         #d4b254;          /* warm champagne — Swiss luxury */
+  --accent-dim:     #a88a3b;
+  --ok:             #5cc689;
+  --warn:           #e6b257;
+  --err:            #e5664e;
+  --info:           #7aa5d6;
+  --chart-grid:     #1c2028;
+  --chart-axis:     #7a8290;
+  --shadow:         0 1px 0 rgba(255,255,255,0.02), 0 8px 24px -12px rgba(0,0,0,0.45);
+}
 
-  /* Key figures */
-  .figure-big {
-    font-size: 32px;
-    font-weight: 600;
-    font-family: var(--mono);
-    letter-spacing: -0.01em;
-  }
-  .figure-mid {
-    font-size: 20px;
-    font-weight: 600;
-    font-family: var(--mono);
-  }
-  .figure-sm {
-    font-size: 14px;
-    font-family: var(--mono);
-  }
-  .figure-label {
-    color: var(--fg-muted);
-    font-size: 11px;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    margin-top: 4px;
-  }
+:root[data-theme="light"] {
+  --bg:             #f5f4ef;
+  --bg-elev-1:      #ffffff;
+  --bg-elev-2:      #faf9f5;
+  --bg-inset:       #efeee8;
+  --border:         #d8d5cc;
+  --border-strong:  #b9b5a8;
+  --fg:             #1a1c20;
+  --fg-dim:         #575b64;
+  --fg-muted:       #8a8f99;
+  --accent:         #7a5c1e;          /* deep bronze — opposite of dark champagne */
+  --accent-dim:     #a17e34;
+  --ok:             #2f8a56;
+  --warn:           #a86a10;
+  --err:            #b33a21;
+  --info:           #2d5d92;
+  --chart-grid:     #e2e0d6;
+  --chart-axis:     #6a707b;
+  --shadow:         0 1px 2px rgba(0,0,0,0.04), 0 8px 24px -14px rgba(0,0,0,0.10);
+}
 
-  /* Color states */
-  .ok { color: var(--ok); }
-  .warn { color: var(--warn); }
-  .err { color: var(--err); }
-  .dim { color: var(--fg-dim); }
+/* -------------------------------------------------------------------------
+   Reset + base typography
+   ------------------------------------------------------------------------- */
 
-  /* Pill badge */
-  .pill {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-family: var(--mono);
-    font-size: 11px;
-    font-weight: 500;
-  }
-  .pill.ok   { background: rgba(74, 222, 128, 0.12); color: #4ade80; }
-  .pill.warn { background: rgba(251, 191, 36, 0.12); color: #fbbf24; }
-  .pill.err  { background: rgba(248, 113, 113, 0.12); color: #f87171; }
-  .pill.dim  { background: rgba(139, 147, 164, 0.12); color: #8a93a4; }
+*, *::before, *::after { box-sizing: border-box; }
 
-  /* Tables */
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-family: var(--mono);
-    font-size: 13px;
-  }
-  th, td {
-    padding: 8px 10px;
-    text-align: left;
-    border-bottom: 1px solid var(--border);
-  }
-  th {
-    color: var(--fg-muted);
-    font-weight: 500;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  td.num { text-align: right; }
-  .empty {
-    color: var(--fg-muted);
-    font-style: italic;
-    padding: 20px 0;
-    text-align: center;
-  }
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: 'Rleud', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13.5px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "tnum" 1;
+  transition: background 200ms ease, color 200ms ease;
+}
 
-  /* Chart container */
-  .chart-wrap {
-    height: 280px;
-    position: relative;
-  }
+body {
+  min-height: 100vh;
+}
 
-  /* Service rows */
-  .service-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 0;
-    border-bottom: 1px solid var(--border);
-    font-family: var(--mono);
-    font-size: 13px;
-  }
-  .service-row:last-child { border-bottom: 0; }
-  .service-row .name { color: var(--fg); }
-  .service-row .right { color: var(--fg-dim); font-size: 12px; }
+/* All numeric displays use tabular nums so columns align */
+.num, .value, .figure-big, .figure-mid, table td.num, table th.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
 
-  /* Footer note */
-  .footnote {
-    color: var(--fg-muted);
-    font-size: 11px;
-    margin-top: 8px;
-  }
+/* Inline code tags use body font (Rleud) — JetBrains Mono is reserved
+   for the live log panel only per product spec. */
+code, pre, .mono {
+  font-family: 'Rleud', sans-serif;
+  font-size: 12px;
+}
 
-  /* KPI widget */
-  .kpi-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 16px;
-  }
-  .kpi {
-    padding: 12px 14px;
-    background: rgba(255,255,255,0.02);
-    border-radius: 6px;
-  }
-  .kpi .label {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--fg-muted);
-    margin-bottom: 4px;
-  }
-  .kpi .value {
-    font-family: var(--mono);
-    font-size: 16px;
-    font-weight: 600;
-  }
+/* Swiss typography: headings and labels in Red Hat Display Extra Bold, UPPERCASE */
+h1, h2, h3, h4,
+.label, .pill, .tab-btn, .badge,
+thead th {
+  font-family: 'Red Hat Display', 'Rleud', sans-serif;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
 
-  /* Loading */
-  .skeleton {
-    background: linear-gradient(90deg, var(--bg-card), var(--bg-card-hover), var(--bg-card));
-    background-size: 200% 100%;
-    animation: shimmer 1.5s infinite;
-    border-radius: 4px;
-    color: transparent;
-  }
-  @keyframes shimmer {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
-  }
+h1 { font-size: 14px; margin: 0; }
+h2 { font-size: 11px; margin: 0 0 14px 0; color: var(--fg-dim); letter-spacing: 0.08em; }
+h3 { font-size: 10.5px; margin: 0; color: var(--fg-muted); }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-dim); }
+
+/* -------------------------------------------------------------------------
+   Header
+   ------------------------------------------------------------------------- */
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 14px 24px;
+  background: var(--bg-elev-1);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 40;
+}
+
+.logo-wrap {
+  display: flex;
+  align-items: center;
+  height: 28px;
+}
+
+.logo-wrap img {
+  height: 22px;
+  width: auto;
+  display: block;
+}
+
+/* Show correct logo per theme */
+:root[data-theme="dark"] .logo-light { display: none; }
+:root[data-theme="light"] .logo-dark { display: none; }
+
+.header-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+}
+
+header nav {
+  display: flex;
+  gap: 4px;
+  margin-left: 8px;
+}
+
+.tab-btn {
+  background: transparent;
+  color: var(--fg-dim);
+  border: 0;
+  padding: 8px 14px;
+  font-family: 'Red Hat Display', sans-serif;
+  font-weight: 800;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.tab-btn:hover {
+  color: var(--fg);
+  background: var(--bg-elev-2);
+}
+
+.tab-btn.active {
+  color: var(--fg);
+  background: var(--bg-elev-2);
+}
+
+.spacer { flex: 1; }
+
+.theme-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--fg-dim);
+  padding: 0;
+  transition: color 120ms, border-color 120ms, background 120ms;
+}
+.theme-toggle:hover {
+  color: var(--fg);
+  border-color: var(--border-strong);
+  background: var(--bg-elev-2);
+}
+.theme-toggle svg { width: 16px; height: 16px; }
+/* Show sun in dark mode (click to go light), moon in light mode (click to go dark) */
+:root[data-theme="dark"] .theme-icon-moon { display: none; }
+:root[data-theme="light"] .theme-icon-sun { display: none; }
+
+.user-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  padding: 4px 12px;
+  border-left: 1px solid var(--border);
+  margin-left: 8px;
+  line-height: 1.2;
+}
+.user-name {
+  font-family: 'Red Hat Display', 'Rleud', sans-serif;
+  font-weight: 800;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg);
+}
+.user-email {
+  font-family: 'Rleud', sans-serif;
+  font-size: 10.5px;
+  color: var(--fg-muted);
+}
+
+/* -------------------------------------------------------------------------
+   Main layout
+   ------------------------------------------------------------------------- */
+
+main {
+  padding: 20px 24px 64px;
+  max-width: 1680px;
+  margin: 0 auto;
+}
+
+.tab { display: none; }
+.tab.active { display: block; }
+
+.grid {
+  display: grid;
+  gap: 14px;
+}
+.cols-1 { grid-template-columns: 1fr; }
+.cols-2 { grid-template-columns: 1fr 1fr; }
+.cols-3 { grid-template-columns: repeat(3, 1fr); }
+.cols-4 { grid-template-columns: repeat(4, 1fr); }
+
+.span-2 { grid-column: span 2; }
+
+@media (max-width: 1100px) {
+  .cols-4 { grid-template-columns: repeat(2, 1fr); }
+  .cols-3 { grid-template-columns: 1fr; }
+}
+@media (max-width: 700px) {
+  .cols-2, .cols-4 { grid-template-columns: 1fr; }
+  .span-2 { grid-column: auto; }
+}
+
+/* -------------------------------------------------------------------------
+   Cards
+   ------------------------------------------------------------------------- */
+
+.card {
+  background: var(--bg-elev-1);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 18px 18px 16px;
+  box-shadow: var(--shadow);
+}
+
+.card h2 {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.figure-big {
+  font-family: 'Rleud', sans-serif;
+  font-weight: 600;
+  font-size: 26px;
+  line-height: 1.15;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+}
+
+.figure-mid {
+  font-family: 'Rleud', sans-serif;
+  font-weight: 600;
+  font-size: 18px;
+  line-height: 1.2;
+  color: var(--fg);
+}
+
+.figure-label {
+  font-family: 'Red Hat Display', sans-serif;
+  font-weight: 800;
+  font-size: 9.5px;
+  color: var(--fg-muted);
+  margin-top: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
+
+.ok   { color: var(--ok); }
+.warn { color: var(--warn); }
+.err  { color: var(--err); }
+.dim  { color: var(--fg-dim); }
+
+/* -------------------------------------------------------------------------
+   Tables
+   ------------------------------------------------------------------------- */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+thead th {
+  font-size: 10px;
+  color: var(--fg-muted);
+  text-align: left;
+  padding: 10px 10px 10px 0;
+  border-bottom: 1px solid var(--border);
+  letter-spacing: 0.1em;
+}
+
+tbody td {
+  padding: 9px 10px 9px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  vertical-align: middle;
+}
+
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover td { background: var(--bg-elev-2); }
+
+.num { text-align: right; font-family: 'Rleud', sans-serif; font-size: 12.5px; }
+th.num { text-align: right; }
+
+.empty {
+  padding: 18px 4px;
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  font-style: italic;
+}
+
+/* -------------------------------------------------------------------------
+   Pills / Badges
+   ------------------------------------------------------------------------- */
+
+.pill, .badge {
+  display: inline-block;
+  padding: 3px 8px;
+  font-size: 9.5px;
+  letter-spacing: 0.09em;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev-2);
+  color: var(--fg-dim);
+  font-family: 'Red Hat Display', sans-serif;
+  font-weight: 800;
+  text-transform: uppercase;
+  line-height: 1.3;
+}
+
+.pill.ok   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); }
+.pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, var(--border)); }
+.pill.err  { color: var(--err);  border-color: color-mix(in srgb, var(--err) 35%, var(--border)); }
+.pill.dim  { color: var(--fg-muted); }
+
+/* -------------------------------------------------------------------------
+   KPI grid (used in System tab Counters)
+   ------------------------------------------------------------------------- */
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+
+.kpi {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 10px 12px;
+}
+
+.kpi .label {
+  font-family: 'Red Hat Display', sans-serif;
+  font-weight: 800;
+  font-size: 9px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 4px;
+}
+
+.kpi .value {
+  font-family: 'Rleud', sans-serif;
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--fg);
+}
+
+/* -------------------------------------------------------------------------
+   Kill-switch banner
+   ------------------------------------------------------------------------- */
+
+.kill-switch-card { position: relative; }
+.kill-switch-card.is-hard {
+  border-color: color-mix(in srgb, var(--err) 55%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--err) 25%, transparent),
+              var(--shadow);
+}
+.kill-switch-card.is-soft {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
+}
+
+.ks-body {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+.ks-summary {
+  font-family: 'Rleud', sans-serif;
+  font-weight: 600;
+  font-size: 16px;
+  color: var(--fg);
+}
+.ks-detail {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  text-align: right;
+}
+
+/* -------------------------------------------------------------------------
+   PnL gauge
+   ------------------------------------------------------------------------- */
+
+.gauge-row {
+  margin-top: 14px;
+}
+.gauge-track {
+  position: relative;
+  height: 8px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  overflow: visible;
+}
+.gauge-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: linear-gradient(90deg, var(--accent), var(--warn));
+  border-radius: 2px 0 0 2px;
+  transition: width 400ms ease;
+}
+.gauge-fill.breach { background: linear-gradient(90deg, var(--warn), var(--err)); }
+.gauge-tick {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  width: 2px;
+  background: var(--err);
+  border-radius: 1px;
+}
+.gauge-tick.warn { background: var(--warn); }
+.gauge-legend {
+  margin-top: 8px;
+  display: flex;
+  gap: 14px;
+  font-family: 'Red Hat Display', sans-serif;
+  font-weight: 800;
+  font-size: 9.5px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.legend-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 1px;
+  margin-right: 5px;
+  vertical-align: middle;
+  background: var(--fg-muted);
+}
+.legend-dot.warn { background: var(--warn); }
+.legend-dot.err  { background: var(--err); }
+
+/* -------------------------------------------------------------------------
+   Exposure bars
+   ------------------------------------------------------------------------- */
+
+.exposure-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 12px;
+  align-items: center;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+}
+.exposure-row:last-child { border-bottom: 0; }
+.exposure-row .label {
+  font-family: 'Red Hat Display', sans-serif;
+  font-weight: 800;
+  font-size: 10px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.exposure-row .value {
+  font-family: 'Rleud', sans-serif;
+  font-size: 12px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.exposure-bar {
+  grid-column: 1 / span 2;
+  height: 4px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+.exposure-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 400ms ease;
+}
+.exposure-bar-fill.warn { background: var(--warn); }
+.exposure-bar-fill.err  { background: var(--err); }
+
+/* -------------------------------------------------------------------------
+   Event timeline
+   ------------------------------------------------------------------------- */
+
+.timeline {
+  max-height: 380px;
+  overflow-y: auto;
+}
+.timeline-entry {
+  display: grid;
+  grid-template-columns: 72px 80px 1fr;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  align-items: baseline;
+}
+.timeline-entry:last-child { border-bottom: 0; }
+.timeline-time {
+  color: var(--fg-muted);
+  font-family: 'Rleud', sans-serif;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.timeline-kind {
+  font-family: 'Red Hat Display', sans-serif;
+  font-weight: 800;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--fg-dim);
+}
+.timeline-kind.ok   { color: var(--ok); }
+.timeline-kind.warn { color: var(--warn); }
+.timeline-kind.err  { color: var(--err); }
+.timeline-kind.info { color: var(--info); }
+.timeline-body {
+  font-family: 'Rleud', sans-serif;
+  font-size: 12px;
+  color: var(--fg);
+}
+
+/* -------------------------------------------------------------------------
+   Fill reconciliation stats
+   ------------------------------------------------------------------------- */
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.stat-row:last-child { border-bottom: 0; }
+.stat-row .stat-label {
+  font-family: 'Red Hat Display', sans-serif;
+  font-weight: 800;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-dim);
+}
+.stat-row .stat-sub {
+  display: block;
+  font-family: 'Rleud', sans-serif;
+  font-weight: 400;
+  font-size: 10.5px;
+  color: var(--fg-muted);
+  letter-spacing: 0;
+  text-transform: none;
+  margin-top: 2px;
+}
+.stat-row .stat-value {
+  font-family: 'Rleud', sans-serif;
+  font-weight: 600;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+.stat-row .stat-value.ok   { color: var(--ok); }
+.stat-row .stat-value.warn { color: var(--warn); }
+.stat-row .stat-value.err  { color: var(--err); }
+
+/* -------------------------------------------------------------------------
+   Trade journal pipeline
+   ------------------------------------------------------------------------- */
+
+.pipeline-wrap {
+  max-height: 520px;
+  overflow-y: auto;
+}
+.pipeline-entry {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.pipeline-entry:last-child { border-bottom: 0; }
+.pipeline-head {
+  display: grid;
+  grid-template-columns: 60px 1fr auto;
+  gap: 10px;
+  align-items: baseline;
+}
+.pipeline-time {
+  color: var(--fg-muted);
+  font-family: 'Rleud', sans-serif;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.pipeline-title {
+  font-family: 'Red Hat Display', sans-serif;
+  font-weight: 800;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg);
+}
+.pipeline-title .dim {
+  color: var(--fg-muted);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  margin-left: 6px;
+}
+
+/* The flow stages — signal → order → fill. Each stage is a pill; the
+   connector between them is a short horizontal rule that colourises
+   based on whether the transition happened. */
+.pipeline-stages {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.pipe-stage {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  font-family: 'Red Hat Display', sans-serif;
+  font-weight: 800;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  background: var(--bg-elev-2);
+  color: var(--fg-dim);
+}
+.pipe-stage.ok   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+.pipe-stage.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); }
+.pipe-stage.err  { color: var(--err);  border-color: color-mix(in srgb, var(--err) 45%, var(--border)); }
+.pipe-stage .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: currentColor;
+  display: inline-block;
+}
+.pipe-arrow {
+  height: 1px;
+  width: 18px;
+  background: var(--border);
+  margin: 0 2px;
+}
+.pipe-arrow.ok { background: color-mix(in srgb, var(--ok) 60%, var(--border)); }
+.pipe-arrow.err { background: color-mix(in srgb, var(--err) 60%, var(--border)); }
+.pipe-detail {
+  margin-top: 6px;
+  font-family: 'Rleud', sans-serif;
+  font-size: 11px;
+  color: var(--fg-muted);
+  padding-left: 70px;
+  font-variant-numeric: tabular-nums;
+}
+.pipe-detail .kv { margin-right: 10px; }
+.pipe-detail .kv .k { color: var(--fg-muted); }
+.pipe-detail .kv .v { color: var(--fg); }
+
+/* -------------------------------------------------------------------------
+   Signal stats — mini bar-stack layout
+   ------------------------------------------------------------------------- */
+
+.sigstat-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 12px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.sigstat-row:last-child { border-bottom: 0; }
+.sigstat-row .label {
+  font-family: 'Red Hat Display', sans-serif;
+  font-weight: 800;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+}
+.sigstat-row .value {
+  font-family: 'Rleud', sans-serif;
+  font-size: 12px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.sigstat-bar {
+  grid-column: 1 / span 2;
+  height: 6px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  display: flex;
+  margin-top: 2px;
+}
+.sigstat-seg { height: 100%; }
+.sigstat-seg.approved  { background: var(--ok); }
+.sigstat-seg.processed { background: var(--accent); }
+.sigstat-seg.rejected  { background: var(--warn); }
+.sigstat-seg.expired   { background: var(--fg-muted); }
+.sigstat-seg.pending   { background: var(--info); }
+.sigstat-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+  font-family: 'Red Hat Display', sans-serif;
+  font-weight: 800;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+}
+.sigstat-legend .dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 1px;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+/* -------------------------------------------------------------------------
+   Kill-switch history table
+   ------------------------------------------------------------------------- */
+
+.ks-history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: 'Rleud', sans-serif;
+  font-size: 12px;
+}
+.ks-history-table th,
+.ks-history-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.ks-history-table thead th {
+  font-size: 9.5px;
+  letter-spacing: 0.09em;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border-strong);
+}
+.ks-history-table tr:last-child td { border-bottom: 0; }
+.ks-history-table .ks-state-active  { color: var(--err); font-weight: 600; }
+.ks-history-table .ks-state-resolved { color: var(--ok);  font-weight: 600; }
+.ks-history-table .ks-kind-hard { color: var(--err); }
+.ks-history-table .ks-kind-soft { color: var(--warn); }
+.ks-history-table .ks-detail {
+  font-size: 11px;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* -------------------------------------------------------------------------
+   Log filter buttons
+   ------------------------------------------------------------------------- */
+
+.log-filter-group {
+  display: inline-flex;
+  gap: 2px;
+  margin-right: 8px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 1px;
+}
+.log-filter-group .log-btn {
+  border: 0;
+  border-radius: 1px;
+  padding: 3px 8px;
+  background: transparent;
+}
+.log-filter-group .log-btn.active {
+  background: var(--bg-elev-2);
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+.log-line.is-hidden { display: none; }
+
+/* -------------------------------------------------------------------------
+   Log line structured format (replaces the previous colour-by-line)
+   ------------------------------------------------------------------------- */
+
+.log-line {
+  display: grid;
+  grid-template-columns: 64px 80px 50px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  padding: 1px 0;
+  border-bottom: 1px dashed transparent;
+}
+.log-line .log-time {
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+.log-line .log-unit {
+  color: var(--info);
+  font-weight: 500;
+}
+.log-line .log-level {
+  font-family: 'Red Hat Display', sans-serif;
+  font-weight: 800;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 1px 5px;
+  border-radius: 2px;
+  display: inline-block;
+  line-height: 1.3;
+  text-align: center;
+}
+.log-line .log-level.ERROR { background: color-mix(in srgb, var(--err) 20%, transparent);  color: var(--err); }
+.log-line .log-level.WARN  { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+.log-line .log-level.INFO  { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
+.log-line .log-level.DEBUG { background: var(--bg-elev-2); color: var(--fg-muted); }
+.log-line .log-body { color: var(--fg); word-break: break-word; }
+.log-line .log-body .kv {
+  color: var(--fg-muted);
+  margin-left: 6px;
+}
+.log-line .log-body .kv .k { color: var(--fg-muted); }
+.log-line .log-body .kv .v { color: var(--fg-dim); }
+
+/* -------------------------------------------------------------------------
+   Service rows (System tab)
+   ------------------------------------------------------------------------- */
+
+.service-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+}
+.service-row:last-child { border-bottom: 0; }
+
+.service-row .name { color: var(--fg); display: flex; align-items: center; gap: 8px; }
+.service-row .right { color: var(--fg-dim); font-family: 'Rleud', sans-serif; font-size: 11.5px; }
+
+/* -------------------------------------------------------------------------
+   Chart wrapper
+   ------------------------------------------------------------------------- */
+
+.chart-wrap {
+  position: relative;
+  height: 280px;
+}
+
+/* -------------------------------------------------------------------------
+   Log panel
+   ------------------------------------------------------------------------- */
+
+.log-panel {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 10px 12px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  height: 420px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-controls {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.log-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  padding: 3px 10px;
+  border-radius: 2px;
+  cursor: pointer;
+  font-family: 'Rleud', sans-serif;
+  font-size: 10.5px;
+  transition: color 100ms, border-color 100ms;
+}
+.log-btn:hover { color: var(--fg); border-color: var(--border-strong); }
+
+.footnote {
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-family: 'Rleud', sans-serif;
+}
+.footnote code {
+  background: var(--bg-elev-2);
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  font-size: 10.5px;
+}
+
+/* -------------------------------------------------------------------------
+   Scrollbar styling (subtle)
+   ------------------------------------------------------------------------- */
+
+.log-panel::-webkit-scrollbar { width: 8px; }
+.log-panel::-webkit-scrollbar-track { background: transparent; }
+.log-panel::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 2px;
+}
+.log-panel::-webkit-scrollbar-thumb:hover { background: var(--fg-muted); }
 </style>
 </head>
 <body>
 
 <header>
-  <h1><span class="brand-dot"></span>razortrade</h1>
+  <div class="logo-wrap">
+    <img src="/assets/logo-dark.svg"  alt="razortrade" class="logo-dark">
+    <img src="/assets/logo-light.svg" alt="razortrade" class="logo-light">
+  </div>
+  <div class="header-divider"></div>
   <nav>
     <button class="tab-btn active" data-tab="trading">Trading</button>
     <button class="tab-btn" data-tab="system">System</button>
   </nav>
   <div class="spacer"></div>
-  <div class="user-badge" id="user-badge"></div>
+  <button class="theme-toggle" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
+    <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="4"></circle>
+      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
+    </svg>
+    <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+    </svg>
+  </button>
+  <div class="user-block" id="user-block">
+    <div class="user-name" id="user-name">—</div>
+    <div class="user-email" id="user-email">—</div>
+  </div>
 </header>
 
 <main>
   <!-- ============== TRADING TAB ============== -->
   <section class="tab active" id="tab-trading">
-    <div class="grid cols-4" style="margin-bottom: 16px;">
+
+    <!-- ROW 0: Kill-switch status banner — FULL WIDTH, TOP PRIORITY ------- -->
+    <div class="grid cols-1" style="margin-bottom: 14px;">
+      <div class="card kill-switch-card" id="ks-card">
+        <h2>
+          <span>Kill-switch</span>
+          <span id="ks-state-pill" class="pill dim">loading…</span>
+        </h2>
+        <div class="ks-body">
+          <div class="ks-summary" id="ks-summary">—</div>
+          <div class="ks-detail mono" id="ks-detail"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ROW 1: Equity KPIs + Effective-PnL-Gauge side-by-side ------------- -->
+    <div class="grid cols-4" style="margin-bottom: 14px;">
       <div class="card">
         <h2>Total Equity</h2>
         <div class="figure-big" id="equity-total">—</div>
         <div class="figure-label" id="equity-updated">—</div>
       </div>
       <div class="card">
-        <h2>Cash (CHF)</h2>
+        <h2>Cash CHF</h2>
         <div class="figure-mid" id="equity-cash">—</div>
         <div class="figure-label">flex account USD → CHF</div>
       </div>
       <div class="card">
-        <h2>Leverage (CHF)</h2>
+        <h2>Leverage CHF</h2>
         <div class="figure-mid" id="equity-leverage">—</div>
         <div class="figure-label">fi_xbtusd portfolio value</div>
       </div>
       <div class="card">
-        <h2>Realised PnL</h2>
+        <h2>Realised PnL CHF</h2>
         <div class="figure-mid" id="equity-realized">—</div>
         <div class="figure-label">CryptoLeverage lifetime</div>
       </div>
     </div>
 
-    <div class="grid cols-2" style="margin-bottom: 16px;">
-      <div class="card span-2">
-        <h2>Equity — 24h</h2>
-        <div class="chart-wrap"><canvas id="equity-chart"></canvas></div>
+    <!-- ROW 2: Risk budgets — Effective PnL gauge + Exposure bars --------- -->
+    <div class="grid cols-2" style="margin-bottom: 14px;">
+      <div class="card">
+        <h2>
+          <span>Effective PnL Leverage Sleeve</span>
+          <span id="eff-pnl-sign" class="pill dim">—</span>
+        </h2>
+        <div class="figure-big" id="eff-pnl-value">—</div>
+        <div class="figure-label" id="eff-pnl-detail">
+          realised + unrealised
+        </div>
+        <div class="gauge-row">
+          <div class="gauge-track">
+            <div class="gauge-fill" id="eff-pnl-bar-soft" style="width: 0%;"></div>
+            <div class="gauge-tick" id="eff-pnl-tick-soft"  style="left: 50%;"></div>
+            <div class="gauge-tick" id="eff-pnl-tick-hard"  style="left: 100%;"></div>
+          </div>
+          <div class="gauge-legend">
+            <span class="legend-dot warn"></span>soft -1000
+            <span class="legend-dot err"></span>hard -1200
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Exposure vs Budget</h2>
+        <div id="exposure-body">
+          <div class="empty">loading…</div>
+        </div>
       </div>
     </div>
 
-    <div class="grid cols-2" style="margin-bottom: 16px;">
+    <!-- ROW 3: Equity chart + Funding rate side-by-side ------------------- -->
+    <div class="grid cols-2" style="margin-bottom: 14px;">
+      <div class="card">
+        <h2>Equity — 24h</h2>
+        <div class="chart-wrap" style="height: 240px;"><canvas id="equity-chart"></canvas></div>
+      </div>
+      <div class="card">
+        <h2>
+          <span>Funding rate</span>
+          <span class="pill dim" id="funding-horizon">per 8h</span>
+        </h2>
+        <div class="figure-big" id="funding-value">—</div>
+        <div class="figure-label" id="funding-detail">
+          PI_XBTUSD perpetual
+        </div>
+        <div class="footnote" style="margin-top: 10px;">
+          Positive = longs pay shorts · negative = shorts pay longs. Realised funding accrues to
+          the leverage sleeve every 8 h.
+        </div>
+      </div>
+    </div>
+
+    <!-- ROW 4: Positions + orders (unchanged data, restyled) -------------- -->
+    <div class="grid cols-2" style="margin-bottom: 14px;">
       <div class="card">
         <h2>Open Positions</h2>
-        <div id="positions-body">
-          <div class="empty">no open positions</div>
-        </div>
+        <div id="positions-body"><div class="empty">no open positions</div></div>
       </div>
       <div class="card">
         <h2>Recent Orders</h2>
-        <div id="orders-body">
-          <div class="empty">no orders yet</div>
-        </div>
+        <div id="orders-body"><div class="empty">no orders yet</div></div>
       </div>
     </div>
 
+    <!-- ROW 4.5: Trade journal pipeline + Signal success rates ------------ -->
+    <div class="grid cols-2" style="margin-bottom: 14px;">
+      <div class="card">
+        <h2>Trade journal pipeline</h2>
+        <div id="pipeline-body"><div class="empty">loading…</div></div>
+      </div>
+      <div class="card">
+        <h2>
+          <span>Signal success rates</span>
+          <span class="pill dim" id="sigstats-pill">all-time</span>
+        </h2>
+        <div id="sigstats-body"><div class="empty">loading…</div></div>
+      </div>
+    </div>
+
+    <!-- ROW 5: Event timeline + Fill reconciliation stats ----------------- -->
+    <div class="grid cols-2" style="margin-bottom: 14px;">
+      <div class="card">
+        <h2>Event timeline</h2>
+        <div id="timeline-body"><div class="empty">loading…</div></div>
+      </div>
+      <div class="card">
+        <h2>Fill reconciliation · 24h</h2>
+        <div id="fill-stats-body"><div class="empty">loading…</div></div>
+      </div>
+    </div>
+
+    <!-- ROW 5.5: Kill-switch event history table -------------------------- -->
+    <div class="grid cols-1" style="margin-bottom: 14px;">
+      <div class="card">
+        <h2>
+          <span>Kill-switch history</span>
+          <span class="pill dim" id="ks-history-count">—</span>
+        </h2>
+        <div id="ks-history-body"><div class="empty">loading…</div></div>
+      </div>
+    </div>
+
+    <!-- ROW 6: Signals (unchanged) ---------------------------------------- -->
     <div class="grid cols-1">
       <div class="card">
         <h2>Recent Signals</h2>
-        <div id="signals-body">
-          <div class="empty">no signals yet</div>
-        </div>
+        <div id="signals-body"><div class="empty">no signals yet</div></div>
       </div>
     </div>
   </section>
 
   <!-- ============== SYSTEM TAB ============== -->
   <section class="tab" id="tab-system">
-    <div class="grid cols-4" style="margin-bottom: 16px;">
+    <div class="grid cols-4" style="margin-bottom: 14px;">
       <div class="card">
         <h2>Equity Writer</h2>
         <div class="figure-mid" id="fresh-equity-age">—</div>
@@ -345,7 +1212,7 @@
       </div>
     </div>
 
-    <div class="grid cols-2" style="margin-bottom: 16px;">
+    <div class="grid cols-2" style="margin-bottom: 14px;">
       <div class="card">
         <h2>Services</h2>
         <div id="services-body"><div class="empty">loading…</div></div>
@@ -365,33 +1232,30 @@
       </div>
     </div>
 
-    <div class="grid cols-1" style="margin-top: 16px;">
+    <div class="grid cols-1" style="margin-top: 14px;">
       <div class="card">
-        <h2>Live Log
-          <span style="float: right; font-weight: normal; text-transform: none; letter-spacing: 0; font-size: 11px;">
+        <h2>
+          <span>Live Log</span>
+          <span class="log-controls">
             <span id="log-status" class="pill dim">connecting…</span>
-            <button id="log-pause" style="background: transparent; border: 1px solid var(--border); color: var(--fg-dim); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-family: var(--mono); font-size: 11px; margin-left: 6px;">pause</button>
-            <button id="log-clear" style="background: transparent; border: 1px solid var(--border); color: var(--fg-dim); padding: 2px 8px; border-radius: 4px; cursor: pointer; font-family: var(--mono); font-size: 11px; margin-left: 4px;">clear</button>
+            <span class="log-filter-group" role="group" aria-label="filter">
+              <button id="log-filter-all"    class="log-btn log-filter active" data-filter="all">all</button>
+              <button id="log-filter-error"  class="log-btn log-filter"        data-filter="error">errors</button>
+              <button id="log-filter-warn"   class="log-btn log-filter"        data-filter="warn">warn+</button>
+              <button id="log-filter-ks"     class="log-btn log-filter"        data-filter="ks">kill-switch</button>
+              <button id="log-filter-fill"   class="log-btn log-filter"        data-filter="fill">fills</button>
+            </span>
+            <button id="log-pause" class="log-btn">pause</button>
+            <button id="log-clear" class="log-btn">clear</button>
           </span>
         </h2>
-        <div id="log-panel" style="
-          background: #050608;
-          border: 1px solid var(--border);
-          border-radius: 6px;
-          padding: 10px 12px;
-          font-family: var(--mono);
-          font-size: 11.5px;
-          line-height: 1.45;
-          height: 420px;
-          overflow-y: auto;
-          white-space: pre-wrap;
-          word-break: break-word;
-        "></div>
-        <div class="footnote" style="margin-top: 8px;">
-          Tailing <code style="font-family: var(--mono);">rt-daemon</code>,
-          <code style="font-family: var(--mono);">razortrade-signals</code>,
-          <code style="font-family: var(--mono);">razortrade-backup</code>,
-          <code style="font-family: var(--mono);">rt-dashboard</code> via <code style="font-family: var(--mono);">journalctl&nbsp;-f</code>.
+        <div id="log-panel" class="log-panel"></div>
+        <div class="footnote" style="margin-top: 10px;">
+          Tailing <code>rt-daemon</code>,
+          <code>razortrade-signals</code>,
+          <code>razortrade-backup</code>,
+          <code>rt-dashboard</code> via <code>journalctl&nbsp;-f</code>.
+          Filters are applied client-side and do not drop the underlying stream.
         </div>
       </div>
     </div>
@@ -399,6 +1263,57 @@
 </main>
 
 <script>
+// ============================================================
+// Theme toggle
+// ============================================================
+(function() {
+  const btn = document.getElementById('theme-toggle');
+  btn.addEventListener('click', () => {
+    const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+    const next = cur === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('rt-theme', next); } catch (e) {}
+    // Re-theme the chart if it exists.
+    if (window.equityChart) {
+      applyChartTheme(window.equityChart);
+      window.equityChart.update('none');
+    }
+  });
+})();
+
+function themeTokens() {
+  const css = getComputedStyle(document.documentElement);
+  return {
+    grid:   css.getPropertyValue('--chart-grid').trim(),
+    axis:   css.getPropertyValue('--chart-axis').trim(),
+    accent: css.getPropertyValue('--accent').trim(),
+    fg:     css.getPropertyValue('--fg').trim(),
+    elev1:  css.getPropertyValue('--bg-elev-1').trim(),
+    border: css.getPropertyValue('--border').trim(),
+  };
+}
+function applyChartTheme(chart) {
+  const t = themeTokens();
+  chart.options.scales.x.grid.color = t.grid;
+  chart.options.scales.x.ticks.color = t.axis;
+  chart.options.scales.y.grid.color = t.grid;
+  chart.options.scales.y.ticks.color = t.axis;
+  chart.options.plugins.tooltip.backgroundColor = t.elev1;
+  chart.options.plugins.tooltip.borderColor = t.border;
+  chart.options.plugins.tooltip.titleColor = t.fg;
+  chart.options.plugins.tooltip.bodyColor = t.fg;
+  chart.data.datasets[0].borderColor = t.accent;
+  chart.data.datasets[0].backgroundColor =
+      t.accent.startsWith('#')
+        ? hexToRgba(t.accent, 0.10)
+        : t.accent;
+}
+function hexToRgba(hex, a) {
+  const m = hex.match(/^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i);
+  if (!m) return hex;
+  return `rgba(${parseInt(m[1],16)}, ${parseInt(m[2],16)}, ${parseInt(m[3],16)}, ${a})`;
+}
+
 // ============================================================
 // Tab switching
 // ============================================================
@@ -414,11 +1329,14 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 // ============================================================
 // Formatting helpers
 // ============================================================
+// Numeric formatting. CHF amounts are always shown without the "CHF"
+// suffix — the column/card heading already carries the currency,
+// doubling it is noise.
 function fmtCHF(v) {
   if (v === null || v === undefined || v === '') return '—';
   const n = parseFloat(v);
   if (Number.isNaN(n)) return v;
-  return n.toLocaleString('de-CH', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' CHF';
+  return n.toLocaleString('de-CH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 function fmtNum(v, digits=2) {
   if (v === null || v === undefined || v === '') return '—';
@@ -450,8 +1368,6 @@ function fmtISO(iso) {
 function pill(text, level) {
   return `<span class="pill ${level}">${text}</span>`;
 }
-
-// Classify freshness age in seconds. Threshold depends on expected cadence.
 function freshnessClass(seconds, expectedSeconds) {
   if (seconds === null || seconds === undefined) return 'err';
   if (seconds < expectedSeconds * 2) return 'ok';
@@ -462,7 +1378,7 @@ function freshnessClass(seconds, expectedSeconds) {
 // ============================================================
 // Trading tab — fetchers
 // ============================================================
-let equityChart = null;
+window.equityChart = null;
 
 async function refreshSummary() {
   try {
@@ -484,9 +1400,7 @@ async function refreshSummary() {
     } else {
       updated.textContent = 'no data';
     }
-  } catch (e) {
-    console.error('summary', e);
-  }
+  } catch (e) { console.error('summary', e); }
 }
 
 async function refreshEquityChart() {
@@ -497,24 +1411,26 @@ async function refreshEquityChart() {
     const data = hist.map(p => parseFloat(p.total_equity_chf));
 
     const ctx = document.getElementById('equity-chart');
-    if (equityChart) {
-      equityChart.data.labels = labels;
-      equityChart.data.datasets[0].data = data;
-      equityChart.update('none');
+    if (window.equityChart) {
+      window.equityChart.data.labels = labels;
+      window.equityChart.data.datasets[0].data = data;
+      applyChartTheme(window.equityChart);
+      window.equityChart.update('none');
     } else {
-      equityChart = new Chart(ctx, {
+      const t = themeTokens();
+      window.equityChart = new Chart(ctx, {
         type: 'line',
         data: {
           labels,
           datasets: [{
-            label: 'Total Equity (CHF)',
+            label: 'Total Equity',
             data,
-            borderColor: '#6aa9ff',
-            backgroundColor: 'rgba(106, 169, 255, 0.08)',
+            borderColor: t.accent,
+            backgroundColor: hexToRgba(t.accent, 0.10),
             fill: true,
             tension: 0.25,
             pointRadius: 0,
-            borderWidth: 2,
+            borderWidth: 1.8,
           }],
         },
         options: {
@@ -524,31 +1440,36 @@ async function refreshEquityChart() {
           plugins: {
             legend: { display: false },
             tooltip: {
-              backgroundColor: '#13161b',
-              borderColor: '#232831',
+              backgroundColor: t.elev1,
+              borderColor: t.border,
               borderWidth: 1,
-              titleColor: '#e6e9ef',
-              bodyColor: '#e6e9ef',
+              titleColor: t.fg,
+              bodyColor: t.fg,
+              titleFont: { family: 'Rleud', size: 11, weight: '600' },
+              bodyFont:  { family: 'Rleud', size: 11 },
+              padding: 10,
             },
           },
           scales: {
             x: {
               type: 'time',
               time: { unit: 'hour' },
-              grid: { color: '#232831' },
-              ticks: { color: '#8a93a4' },
+              grid: { color: t.grid },
+              ticks: { color: t.axis, font: { family: 'Rleud', size: 10 } },
             },
             y: {
-              grid: { color: '#232831' },
-              ticks: { color: '#8a93a4', callback: v => v.toLocaleString() },
+              grid: { color: t.grid },
+              ticks: {
+                color: t.axis,
+                font: { family: 'Rleud', size: 10 },
+                callback: v => v.toLocaleString(),
+              },
             },
           },
         },
       });
     }
-  } catch (e) {
-    console.error('equity-chart', e);
-  }
+  } catch (e) { console.error('equity-chart', e); }
 }
 
 async function refreshPositions() {
@@ -653,7 +1574,6 @@ async function refreshFreshness() {
     const eqEl = document.getElementById('fresh-equity-age');
     if (f.seconds_since_equity_snapshot !== null) {
       eqEl.textContent = fmtDuration(f.seconds_since_equity_snapshot);
-      // Equity writer ticks every 30 s.
       eqEl.className = 'figure-mid ' + freshnessClass(f.seconds_since_equity_snapshot, 30);
     } else {
       eqEl.textContent = '—';
@@ -663,7 +1583,6 @@ async function refreshFreshness() {
     const sigEl = document.getElementById('fresh-signal-age');
     if (f.seconds_since_last_signal !== null) {
       sigEl.textContent = fmtDuration(f.seconds_since_last_signal);
-      // Signal timer fires every 4 h = 14400 s.
       sigEl.className = 'figure-mid ' + freshnessClass(f.seconds_since_last_signal, 14400);
     } else {
       sigEl.textContent = 'never';
@@ -760,30 +1679,12 @@ async function refreshBackup() {
                  ? `in ${fmtDuration(b.seconds_until_next_run)}`
                  : '—';
     body.innerHTML = `
-      <div class="kpi">
-        <div class="label">Last run</div>
-        <div class="value">${lastRun}</div>
-      </div>
-      <div class="kpi">
-        <div class="label">Exit status</div>
-        <div class="value">${pill(b.last_exit_status ?? 'n/a', exitLevel)}</div>
-      </div>
-      <div class="kpi">
-        <div class="label">Next run</div>
-        <div class="value">${nextRun}</div>
-      </div>
-      <div class="kpi">
-        <div class="label">Local backups</div>
-        <div class="value">${b.local_backup_count}</div>
-      </div>
-      <div class="kpi">
-        <div class="label">Latest local</div>
-        <div class="value">${b.local_backup_latest_iso ?? '—'}</div>
-      </div>
-      <div class="kpi">
-        <div class="label">Latest size</div>
-        <div class="value">${fmtBytes(b.local_backup_latest_bytes)}</div>
-      </div>`;
+      <div class="kpi"><div class="label">Last run</div><div class="value">${lastRun}</div></div>
+      <div class="kpi"><div class="label">Exit status</div><div class="value">${pill(b.last_exit_status ?? 'n/a', exitLevel)}</div></div>
+      <div class="kpi"><div class="label">Next run</div><div class="value">${nextRun}</div></div>
+      <div class="kpi"><div class="label">Local backups</div><div class="value">${b.local_backup_count}</div></div>
+      <div class="kpi"><div class="label">Latest local</div><div class="value">${b.local_backup_latest_iso ?? '—'}</div></div>
+      <div class="kpi"><div class="label">Latest size</div><div class="value">${fmtBytes(b.local_backup_latest_bytes)}</div></div>`;
   } catch (e) { console.error('backup', e); }
 }
 
@@ -799,50 +1700,116 @@ let logPaused = false;
 let logEventSource = null;
 const MAX_LOG_LINES = 500;
 
-// Color a journalctl line based on its level keyword. journalctl
-// --output=short-iso emits lines like:
-//   2026-04-20T00:12:34+0200 razortrade-prod rt-daemon[1234]: <body>
-// The <body> is often JSON with `"level":"INFO"` or similar. We grep
-// cheaply for the literal string.
 function logLineLevel(line) {
-  if (/"level":"ERROR"|\bERROR\b/.test(line)) return 'err';
-  if (/"level":"WARN"|\bWARN\b|\bWARNING\b/.test(line)) return 'warn';
-  if (/"level":"DEBUG"|\bDEBUG\b/.test(line)) return 'dim';
-  return 'default';
+  if (/"level":"ERROR"|\bERROR\b/.test(line)) return 'ERROR';
+  if (/"level":"WARN"|\bWARN\b|\bWARNING\b/.test(line)) return 'WARN';
+  if (/"level":"DEBUG"|\bDEBUG\b/.test(line)) return 'DEBUG';
+  return 'INFO';
 }
 
-const LOG_COLOR = {
-  err:     '#f87171',
-  warn:    '#fbbf24',
-  default: '#e6e9ef',
-  dim:     '#5d6573',
-};
+/**
+ * Parse a journalctl line and extract structured fields for PSM-style
+ * display. journalctl --output=short-iso emits lines like:
+ *
+ *   2026-04-20T08:14:05.000050Z+0200 razortrade-prod rt-daemon[22372]: {json}
+ *
+ * The daemon bodies are `tracing`-emitted JSON with at least `timestamp`,
+ * `level`, and `fields.message`. If JSON parsing fails we fall back to a
+ * simple level/message extraction.
+ */
+function parseLogLine(raw) {
+  // Strip journalctl prefix and capture (time, unit, body).
+  const m = raw.match(/^(\d{4}-\d{2}-\d{2}T)?(\d{2}:\d{2}:\d{2})[^\s]*\s+\S+\s+(\S+?)\[\d+\]:\s?(.*)$/);
+  let time = '';
+  let unit = '';
+  let body = raw;
+  if (m) {
+    time = m[2];
+    unit = m[3].replace('razortrade-', '').replace('rt-', '');
+    body = m[4];
+  }
+
+  let level = logLineLevel(raw);
+  let message = body;
+  let kv = [];
+
+  // Try to parse JSON body emitted by tracing
+  const firstBrace = body.indexOf('{');
+  if (firstBrace >= 0) {
+    try {
+      const j = JSON.parse(body.substring(firstBrace));
+      if (j.level) level = j.level;
+      if (j.fields && typeof j.fields === 'object') {
+        if (typeof j.fields.message === 'string') {
+          message = j.fields.message;
+        }
+        for (const [k, v] of Object.entries(j.fields)) {
+          if (k === 'message') continue;
+          kv.push([k, typeof v === 'string' ? v : JSON.stringify(v)]);
+        }
+      }
+      // Promote span info if present (e.g. `signal_id`, `instrument`)
+      if (j.span && typeof j.span === 'object') {
+        for (const [k, v] of Object.entries(j.span)) {
+          if (k === 'name') continue;
+          kv.push([k, typeof v === 'string' ? v : JSON.stringify(v)]);
+        }
+      }
+    } catch {
+      // Not JSON; keep as-is
+    }
+  }
+
+  return { time, unit, level, message, kv };
+}
 
 function appendLogLine(line) {
   if (logPaused) return;
-  const level = logLineLevel(line);
-  const div = document.createElement('div');
-  div.style.color = LOG_COLOR[level];
-  // Compress the journalctl prefix to save horizontal space. We keep
-  // only HH:MM:SS + the unit short name + the body.
-  //   "2026-04-20T00:12:34+0200 razortrade-prod rt-daemon[1234]: …"
-  //   → "00:12:34 rt-daemon: …"
-  const m = line.match(/^(\d{4}-\d{2}-\d{2}T)?(\d{2}:\d{2}:\d{2})[^\s]*\s+\S+\s+(\S+?)\[\d+\]:\s?(.*)$/);
-  if (m) {
-    const timeStr = m[2];
-    const unit = m[3].replace('razortrade-', '').replace('rt-', '');
-    const body = m[4];
-    div.textContent = `${timeStr} ${unit.padEnd(10)} ${body}`;
-  } else {
-    div.textContent = line;
+  const p = parseLogLine(line);
+
+  const row = document.createElement('div');
+  row.className = 'log-line';
+  const timeCell  = document.createElement('div');
+  timeCell.className = 'log-time';
+  timeCell.textContent = p.time;
+  const unitCell  = document.createElement('div');
+  unitCell.className = 'log-unit';
+  unitCell.textContent = p.unit;
+  const levelCell = document.createElement('div');
+  levelCell.className = 'log-level ' + p.level;
+  levelCell.textContent = p.level;
+  const bodyCell  = document.createElement('div');
+  bodyCell.className = 'log-body';
+
+  // Message + key=value trailing fields
+  const msg = document.createElement('span');
+  msg.textContent = p.message;
+  bodyCell.appendChild(msg);
+
+  if (p.kv.length > 0) {
+    const kvSpan = document.createElement('span');
+    kvSpan.className = 'kv';
+    for (const [k, v] of p.kv) {
+      const pair = document.createElement('span');
+      pair.textContent = ` ${k}=${v}`;
+      kvSpan.appendChild(pair);
+    }
+    bodyCell.appendChild(kvSpan);
   }
-  logPanel.appendChild(div);
-  // Trim old lines to keep DOM light.
+
+  row.appendChild(timeCell);
+  row.appendChild(unitCell);
+  row.appendChild(levelCell);
+  row.appendChild(bodyCell);
+  // Apply current filter so new arrivals respect the active view
+  if (typeof currentLogFilter !== 'undefined' && !logLineMatches(row, currentLogFilter)) {
+    row.classList.add('is-hidden');
+  }
+  logPanel.appendChild(row);
+
   while (logPanel.children.length > MAX_LOG_LINES) {
     logPanel.removeChild(logPanel.firstChild);
   }
-  // Auto-scroll only if user is near the bottom; otherwise they're
-  // probably reading older entries and we don't want to yank them back.
   const nearBottom = logPanel.scrollTop + logPanel.clientHeight >= logPanel.scrollHeight - 40;
   if (nearBottom) {
     logPanel.scrollTop = logPanel.scrollHeight;
@@ -850,24 +1817,14 @@ function appendLogLine(line) {
 }
 
 function connectLogStream() {
-  if (logEventSource) {
-    try { logEventSource.close(); } catch {}
-  }
+  if (logEventSource) { try { logEventSource.close(); } catch {} }
   logStatus.className = 'pill dim';
   logStatus.textContent = 'connecting…';
-
   const es = new EventSource('/api/logs/stream?tail=100');
   logEventSource = es;
-
-  es.onopen = () => {
-    logStatus.className = 'pill ok';
-    logStatus.textContent = 'live';
-  };
-  es.onmessage = (ev) => {
-    appendLogLine(ev.data);
-  };
-  es.addEventListener('error', (ev) => {
-    // EventSource auto-reconnects; we only update status.
+  es.onopen = () => { logStatus.className = 'pill ok'; logStatus.textContent = 'live'; };
+  es.onmessage = (ev) => { appendLogLine(ev.data); };
+  es.addEventListener('error', () => {
     logStatus.className = 'pill warn';
     logStatus.textContent = 'reconnecting…';
   });
@@ -876,26 +1833,649 @@ function connectLogStream() {
 logPauseBtn.addEventListener('click', () => {
   logPaused = !logPaused;
   logPauseBtn.textContent = logPaused ? 'resume' : 'pause';
-  logPauseBtn.style.color = logPaused ? 'var(--warn)' : 'var(--fg-dim)';
 });
-
-logClearBtn.addEventListener('click', () => {
-  logPanel.innerHTML = '';
-});
+logClearBtn.addEventListener('click', () => { logPanel.innerHTML = ''; });
 
 connectLogStream();
 
 // ============================================================
+// Header user badge (from oauth2-proxy headers via /api/user)
+// ============================================================
+async function refreshUser() {
+  try {
+    const r = await fetch('/api/user');
+    const u = await r.json();
+    const nameEl = document.getElementById('user-name');
+    const emailEl = document.getElementById('user-email');
+    // Prefer the Google-supplied display name; fall back to the email
+    // local-part if the proxy didn't surface one.
+    if (u.name) {
+      nameEl.textContent = u.name;
+    } else if (u.email) {
+      nameEl.textContent = u.email.split('@')[0];
+    } else {
+      nameEl.textContent = '—';
+    }
+    emailEl.textContent = u.email || '—';
+  } catch (e) { console.error('user', e); }
+}
+
+// ============================================================
+// Kill-switch banner
+// ============================================================
+async function refreshKillSwitch() {
+  try {
+    const r = await fetch('/api/kill-switch');
+    const k = await r.json();
+    const card = document.getElementById('ks-card');
+    const pill = document.getElementById('ks-state-pill');
+    const sum  = document.getElementById('ks-summary');
+    const det  = document.getElementById('ks-detail');
+
+    card.classList.remove('is-hard', 'is-soft');
+
+    if (k.state === 'armed') {
+      pill.className = 'pill ok';
+      pill.textContent = 'armed';
+      sum.textContent = 'All guards nominal. Leveraged trading enabled.';
+      det.textContent = '';
+    } else if (k.state === 'hard_triggered') {
+      card.classList.add('is-hard');
+      pill.className = 'pill err';
+      pill.textContent = 'hard-triggered';
+      const ev = k.active_event || {};
+      let detail = '';
+      try {
+        const j = JSON.parse(ev.reason_detail_json || '{}');
+        if (j.kind) detail = Object.entries(j)
+          .filter(([key]) => key !== 'kind')
+          .map(([key, val]) => `${key}=${val}`).join(' · ');
+      } catch {}
+      sum.textContent = `Panic-close engaged · ${ev.reason_kind || '?'}`;
+      det.textContent = `event #${ev.id ?? '?'} · triggered ${fmtISO(ev.triggered_at)}${detail ? ' · ' + detail : ''}`;
+    } else if (k.state === 'soft_triggered') {
+      card.classList.add('is-soft');
+      pill.className = 'pill warn';
+      pill.textContent = 'soft-triggered';
+      const ev = k.active_event || {};
+      sum.textContent = `New trades blocked · ${ev.reason_kind || '?'}`;
+      det.textContent = `event #${ev.id ?? '?'} · triggered ${fmtISO(ev.triggered_at)}`;
+    }
+  } catch (e) { console.error('kill-switch', e); }
+}
+
+// ============================================================
+// Effective PnL gauge — reuses /api/summary for the numbers.
+// The gauge goes from 0 at the left to the hard threshold (-1200) at
+// the right, so that the bar fill grows as we approach the cliff.
+// ============================================================
+const SOFT_CHF = -1000;
+const HARD_CHF = -1200;
+
+function refreshEffectivePnl(summary) {
+  const realized = parseFloat(summary.realized_pnl_chf) || 0;
+  const unrealized = parseFloat(summary.unrealized_pnl_leverage_chf) || 0;
+  const eff = realized + unrealized;
+
+  const valEl  = document.getElementById('eff-pnl-value');
+  const signEl = document.getElementById('eff-pnl-sign');
+  const detEl  = document.getElementById('eff-pnl-detail');
+  const bar    = document.getElementById('eff-pnl-bar-soft');
+  const tickS  = document.getElementById('eff-pnl-tick-soft');
+  const tickH  = document.getElementById('eff-pnl-tick-hard');
+
+  valEl.textContent = fmtCHF(eff);
+  valEl.className = 'figure-big ' + (eff < 0 ? 'err' : eff > 0 ? 'ok' : 'dim');
+
+  detEl.textContent =
+    `realised ${fmtCHF(realized)} · unrealised ${fmtCHF(unrealized)}`;
+
+  // Bar width: percentage of the way from 0 to HARD_CHF.
+  // Positive PnL shows 0%. Loss grows the bar.
+  const pct = Math.min(100, Math.max(0, (-eff / -HARD_CHF) * 100));
+  bar.style.width = pct.toFixed(1) + '%';
+  bar.classList.toggle('breach', eff <= SOFT_CHF);
+
+  // Tick positions: soft at SOFT/HARD * 100% = 83.3%, hard at 100%.
+  tickS.style.left = ((-SOFT_CHF / -HARD_CHF) * 100).toFixed(1) + '%';
+  tickS.classList.add('warn');
+  tickH.style.left = '100%';
+
+  // Sign pill
+  if (eff >= 0) {
+    signEl.className = 'pill ok';
+    signEl.textContent = 'nominal';
+  } else if (eff > SOFT_CHF) {
+    signEl.className = 'pill dim';
+    signEl.textContent = fmtCHF(eff - SOFT_CHF) + ' to soft';
+  } else if (eff > HARD_CHF) {
+    signEl.className = 'pill warn';
+    signEl.textContent = fmtCHF(eff - HARD_CHF) + ' to hard';
+  } else {
+    signEl.className = 'pill err';
+    signEl.textContent = 'past hard';
+  }
+}
+
+// ============================================================
+// Exposure vs Budget (progress bars)
+// ============================================================
+function refreshExposure(summary, positionsRows) {
+  // Static config from RiskConfig defaults. If these change in daemon.toml
+  // the UI will lag until we surface them via an API — out of scope here.
+  const MAX_LEVERAGE            = 2.0;
+  const MAX_NOTIONAL_CHF_ORDER  = 1000;
+  const MAX_DRAWDOWN_FRACTION   = 0.20;
+
+  const realized = parseFloat(summary.realized_pnl_chf) || 0;
+  const unrealized = parseFloat(summary.unrealized_pnl_leverage_chf) || 0;
+  const effective = realized + unrealized;
+  const drawdown = parseFloat(summary.drawdown) || 0;
+  const leverageValue = parseFloat(summary.crypto_leverage_value_chf) || 0;
+
+  // Approximate current open notional from positions (qty * avg_entry_price,
+  // in contract-terms USD; contracts are 1 USD inverse for PI_XBTUSD).
+  // We keep it in CHF via the ratio leverage_value_chf / abs_contract_sum
+  // but if there are no positions we just show 0.
+  let openNotionalChf = 0;
+  for (const p of positionsRows) {
+    const qty = parseFloat(p.quantity) || 0;
+    if (qty !== 0) openNotionalChf = Math.abs(leverageValue);
+  }
+
+  const items = [
+    { label: 'Realised loss vs budget',
+      current: Math.abs(Math.min(realized, 0)),
+      budget:  Math.abs(SOFT_CHF),
+      unit: ' CHF',
+      hardBudget: Math.abs(HARD_CHF),
+    },
+    { label: 'Effective PnL vs hard threshold',
+      current: Math.abs(Math.min(effective, 0)),
+      budget:  Math.abs(HARD_CHF),
+      unit: ' CHF',
+    },
+    { label: 'Open notional vs per-order cap',
+      current: openNotionalChf,
+      budget:  MAX_NOTIONAL_CHF_ORDER,
+      unit: ' CHF',
+    },
+    { label: 'Portfolio drawdown vs limit',
+      current: drawdown * 100,
+      budget:  MAX_DRAWDOWN_FRACTION * 100,
+      unit: ' %',
+      digits: 2,
+    },
+  ];
+
+  const body = document.getElementById('exposure-body');
+  body.innerHTML = items.map(it => {
+    const pct = it.budget > 0 ? Math.min(100, (it.current / it.budget) * 100) : 0;
+    const cls = pct >= 100 ? 'err' : pct >= 75 ? 'warn' : '';
+    const digits = it.digits ?? 0;
+    return `
+      <div class="exposure-row">
+        <div class="label">${it.label}</div>
+        <div class="value">${fmtNum(it.current, digits)}${it.unit} / ${fmtNum(it.budget, digits)}${it.unit}</div>
+        <div class="exposure-bar"><div class="exposure-bar-fill ${cls}" style="width: ${pct.toFixed(1)}%;"></div></div>
+      </div>`;
+  }).join('');
+}
+
+// ============================================================
+// Event timeline
+// ============================================================
+async function refreshTimeline() {
+  try {
+    const r = await fetch('/api/event-timeline');
+    const entries = await r.json();
+    const body = document.getElementById('timeline-body');
+    if (entries.length === 0) {
+      body.innerHTML = '<div class="empty">no events yet</div>';
+      return;
+    }
+    body.innerHTML = '<div class="timeline">' + entries.map(e => {
+      const t = new Date(e.at);
+      const hhmm = Number.isNaN(t.getTime())
+        ? '—'
+        : t.toLocaleTimeString('de-CH', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Europe/Zurich' });
+      return `
+        <div class="timeline-entry">
+          <div class="timeline-time">${hhmm}</div>
+          <div class="timeline-kind ${e.severity}">${e.kind}</div>
+          <div class="timeline-body">${e.summary}</div>
+        </div>`;
+    }).join('') + '</div>';
+  } catch (e) { console.error('timeline', e); }
+}
+
+// ============================================================
+// Fill reconciliation stats
+// ============================================================
+async function refreshFillStats() {
+  try {
+    const r = await fetch('/api/fill-stats');
+    const s = await r.json();
+    const body = document.getElementById('fill-stats-body');
+
+    // Value class: 0 for error-counters is ok; positive = warn/err.
+    const zeroIsGood = (n) => n === 0 ? 'ok' : n < 3 ? 'warn' : 'err';
+    const positiveNormal = () => '';
+
+    body.innerHTML = `
+      <div class="stat-row">
+        <div>
+          <div class="stat-label">Applied fills (24h)</div>
+          <div class="stat-sub">fills reconciled from Kraken WS</div>
+        </div>
+        <div class="stat-value">${s.applied_fills_24h}</div>
+      </div>
+      <div class="stat-row">
+        <div>
+          <div class="stat-label">Orphan-catcher activations</div>
+          <div class="stat-sub">CV-1: fill matched to pending order via cli_ord_id</div>
+        </div>
+        <div class="stat-value ${s.orphan_catcher_24h === 0 ? 'ok' : 'warn'}">${s.orphan_catcher_24h}</div>
+      </div>
+      <div class="stat-row">
+        <div>
+          <div class="stat-label">Unknown-order warnings</div>
+          <div class="stat-sub">fills without matching local order (should be 0)</div>
+        </div>
+        <div class="stat-value ${zeroIsGood(s.unknown_order_warnings_24h)}">${s.unknown_order_warnings_24h}</div>
+      </div>
+      <div class="stat-row">
+        <div>
+          <div class="stat-label">WS deserialisation failures</div>
+          <div class="stat-sub">CV-7: inbound message did not match any known variant</div>
+        </div>
+        <div class="stat-value ${zeroIsGood(s.ws_deser_failures_24h)}">${s.ws_deser_failures_24h}</div>
+      </div>
+      <div class="stat-row">
+        <div>
+          <div class="stat-label">WS reconnects</div>
+          <div class="stat-sub">connection lost events (Kraken demo is noisy)</div>
+        </div>
+        <div class="stat-value">${s.ws_reconnects_24h}</div>
+      </div>
+      <div class="stat-row">
+        <div>
+          <div class="stat-label">Applied fills (total)</div>
+          <div class="stat-sub">lifetime count across applied_fills table</div>
+        </div>
+        <div class="stat-value">${s.applied_fills_total}</div>
+      </div>
+    `;
+  } catch (e) { console.error('fill-stats', e); }
+}
+
+// ============================================================
+// Funding rate — placeholder until a dedicated endpoint is wired
+// ============================================================
+// The daemon records per-signal funding context in `signals.metadata_json`
+// but recent-signals doesn't surface that column. For now we show a dash
+// with a clear explanation; a follow-up patch will either widen the
+// recent-signals endpoint or add a dedicated /api/funding probe.
+async function refreshFunding() {
+  const valEl = document.getElementById('funding-value');
+  const detEl = document.getElementById('funding-detail');
+  const horizonEl = document.getElementById('funding-horizon');
+  valEl.textContent = '—';
+  valEl.className = 'figure-big dim';
+  detEl.textContent = 'awaiting /api/funding endpoint (Turn 4)';
+  horizonEl.className = 'pill dim';
+}
+
+// ============================================================
+// Trade journal pipeline
+// ============================================================
+//
+// Maps raw signals + orders into a readable flow:
+//
+//   11:07:13  PI_XBTUSD · trend_entry          approved
+//             [SIGNAL OK] → [ORDER submitted] → [FILL 330 @ 75.2k]
+//
+//             signal_id=42  order_id=17  cli=rt-s42
+//
+// Green/amber/red colour each stage so a glance tells you where
+// something got stuck (rejected pre-order, failed order, partial
+// fill, etc).
+async function refreshTradePipeline() {
+  try {
+    const r = await fetch('/api/trade-pipeline');
+    const rows = await r.json();
+    const body = document.getElementById('pipeline-body');
+    if (rows.length === 0) {
+      body.innerHTML = '<div class="empty">no signals yet</div>';
+      return;
+    }
+
+    const html = ['<div class="pipeline-wrap">'];
+    for (const s of rows) {
+      const t = new Date(s.created_at);
+      const hhmm = Number.isNaN(t.getTime())
+        ? '—'
+        : t.toLocaleTimeString('de-CH', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Europe/Zurich' });
+
+      // Stage 1: signal
+      let sigStage = 'ok';
+      let sigLabel = s.status;
+      if (s.status === 'rejected')       { sigStage = 'warn'; }
+      else if (s.status === 'expired')   { sigStage = 'warn'; }
+      else if (s.status === 'pending')   { sigStage = ''; }
+
+      // Aggregate order stages
+      const orders = s.orders || [];
+      let stagesHtml = `
+        <span class="pipe-stage ${sigStage}"><span class="dot"></span>signal · ${sigLabel}</span>`;
+
+      if (orders.length === 0) {
+        if (s.status === 'approved') {
+          // Approved but no order yet = queued
+          stagesHtml += `<span class="pipe-arrow"></span>
+            <span class="pipe-stage"><span class="dot"></span>order queued</span>`;
+        } else {
+          // Rejected/expired/pending without order = nothing downstream
+          stagesHtml += `<span class="pipe-arrow"></span>
+            <span class="pipe-stage"><span class="dot"></span>no order</span>`;
+        }
+      } else {
+        for (const o of orders) {
+          let orderStage = 'ok';
+          let orderLabel = o.status;
+          if (o.status === 'rejected' || o.status === 'failed') orderStage = 'err';
+          else if (o.status === 'closed_externally')            orderStage = 'warn';
+          else if (o.status === 'cancelled')                    orderStage = 'warn';
+          else if (o.status === 'submitted')                    orderStage = '';
+          else if (o.status === 'filled')                       orderStage = 'ok';
+
+          const fq = parseFloat(o.filled_quantity || '0');
+          const avgPx = o.avg_fill_price ? parseFloat(o.avg_fill_price) : null;
+          const hasFill = fq > 0;
+
+          stagesHtml += `<span class="pipe-arrow ${orderStage === 'err' ? 'err' : ''}"></span>
+            <span class="pipe-stage ${orderStage}"><span class="dot"></span>order · ${orderLabel}</span>`;
+          if (hasFill) {
+            stagesHtml += `<span class="pipe-arrow ok"></span>
+              <span class="pipe-stage ok"><span class="dot"></span>fill · ${fq.toLocaleString('de-CH')}${avgPx ? ' @ ' + avgPx.toLocaleString('de-CH') : ''}</span>`;
+          }
+        }
+      }
+
+      // Detail line: ids, cli_ord_id, rejection reason if any
+      const detailParts = [
+        `<span class="kv"><span class="k">signal_id=</span><span class="v">${s.id}</span></span>`,
+        `<span class="kv"><span class="k">type=</span><span class="v">${s.signal_type}</span></span>`,
+        `<span class="kv"><span class="k">side=</span><span class="v">${s.side}</span></span>`,
+      ];
+      if (orders.length > 0) {
+        for (const o of orders) {
+          detailParts.push(`<span class="kv"><span class="k">order=</span><span class="v">${o.id}${o.broker_order_id ? ' · ' + o.broker_order_id.substring(0, 8) : ''}${o.cli_ord_id ? ' · ' + o.cli_ord_id : ''}</span></span>`);
+        }
+      }
+      if (s.rejection_reason) {
+        detailParts.push(`<span class="kv"><span class="k">reason=</span><span class="v">${s.rejection_reason}</span></span>`);
+      }
+
+      html.push(`
+        <div class="pipeline-entry">
+          <div class="pipeline-head">
+            <div class="pipeline-time">${hhmm}</div>
+            <div class="pipeline-title">${s.instrument_symbol}<span class="dim">${s.signal_type}</span></div>
+          </div>
+          <div class="pipeline-stages">${stagesHtml}</div>
+          <div class="pipe-detail">${detailParts.join('')}</div>
+        </div>`);
+    }
+    html.push('</div>');
+    body.innerHTML = html.join('');
+  } catch (e) { console.error('pipeline', e); }
+}
+
+// ============================================================
+// Signal success rates
+// ============================================================
+async function refreshSignalStats() {
+  try {
+    const r = await fetch('/api/signal-stats');
+    const s = await r.json();
+    const body = document.getElementById('sigstats-body');
+
+    const total = s.total || 0;
+    const renderBar = (n, klass) => {
+      const w = total > 0 ? (n / total) * 100 : 0;
+      return `<div class="sigstat-seg ${klass}" style="width: ${w.toFixed(2)}%;" title="${klass} ${n}"></div>`;
+    };
+
+    body.innerHTML = `
+      <div class="sigstat-row">
+        <div class="label">Total signals · all-time</div>
+        <div class="value">${total}</div>
+        <div class="sigstat-bar">
+          ${renderBar(s.processed || 0, 'processed')}
+          ${renderBar(s.approved  || 0, 'approved')}
+          ${renderBar(s.rejected  || 0, 'rejected')}
+          ${renderBar(s.expired   || 0, 'expired')}
+          ${renderBar(s.pending   || 0, 'pending')}
+        </div>
+      </div>
+      <div class="sigstat-row">
+        <div class="label">Processed</div>
+        <div class="value">${s.processed || 0} · ${pct(s.processed, total)}</div>
+      </div>
+      <div class="sigstat-row">
+        <div class="label">Approved (not yet processed)</div>
+        <div class="value">${s.approved || 0} · ${pct(s.approved, total)}</div>
+      </div>
+      <div class="sigstat-row">
+        <div class="label">Rejected</div>
+        <div class="value">${s.rejected || 0} · ${pct(s.rejected, total)}</div>
+      </div>
+      <div class="sigstat-row">
+        <div class="label">Expired</div>
+        <div class="value">${s.expired || 0} · ${pct(s.expired, total)}</div>
+      </div>
+      <div class="sigstat-row">
+        <div class="label">Pending</div>
+        <div class="value">${s.pending || 0} · ${pct(s.pending, total)}</div>
+      </div>
+      <div class="sigstat-row">
+        <div class="label">Last 24h</div>
+        <div class="value">${s.last_24h_total || 0} total · ${s.last_24h_approved || 0} approved · ${s.last_24h_rejected || 0} rejected</div>
+      </div>
+      <div class="sigstat-legend">
+        <span><span class="dot" style="background: var(--accent);"></span>processed</span>
+        <span><span class="dot" style="background: var(--ok);"></span>approved</span>
+        <span><span class="dot" style="background: var(--warn);"></span>rejected</span>
+        <span><span class="dot" style="background: var(--fg-muted);"></span>expired</span>
+        <span><span class="dot" style="background: var(--info);"></span>pending</span>
+      </div>
+    `;
+  } catch (e) { console.error('signal-stats', e); }
+}
+
+function pct(n, total) {
+  if (!total || total <= 0) return '0.0%';
+  const v = (n || 0) / total * 100;
+  return v.toFixed(1) + '%';
+}
+
+// ============================================================
+// Kill-switch history (table, reuses /api/kill-switch recent_events)
+// ============================================================
+async function refreshKillSwitchHistory() {
+  try {
+    const r = await fetch('/api/kill-switch');
+    const k = await r.json();
+    const body = document.getElementById('ks-history-body');
+    const pill = document.getElementById('ks-history-count');
+
+    const events = k.recent_events || [];
+    pill.textContent = events.length + ' events';
+
+    if (events.length === 0) {
+      body.innerHTML = '<div class="empty">no kill-switch events on record</div>';
+      return;
+    }
+
+    const rows = events.map(ev => {
+      const t = new Date(ev.triggered_at);
+      const tStr = Number.isNaN(t.getTime())
+        ? ev.triggered_at
+        : t.toLocaleString('de-CH', { timeZone: 'Europe/Zurich' });
+      const kindClass = ev.reason_kind.startsWith('hard_') ? 'ks-kind-hard' : 'ks-kind-soft';
+      const stateClass = ev.resolved_at ? 'ks-state-resolved' : 'ks-state-active';
+      const stateText  = ev.resolved_at ? 'resolved' : 'active';
+
+      // Pretty-print the reason detail JSON into key=value pairs.
+      let detail = '—';
+      try {
+        const j = JSON.parse(ev.reason_detail_json || '{}');
+        const pairs = Object.entries(j)
+          .filter(([k]) => k !== 'kind')
+          .map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`);
+        if (pairs.length > 0) detail = pairs.join(' · ');
+      } catch {}
+
+      return `
+        <tr>
+          <td class="mono">#${ev.id}</td>
+          <td>${tStr}</td>
+          <td class="${kindClass}">${ev.reason_kind}</td>
+          <td class="ks-detail">${detail}</td>
+          <td class="${stateClass}">${stateText}</td>
+        </tr>`;
+    }).join('');
+
+    body.innerHTML = `
+      <table class="ks-history-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Triggered</th>
+            <th>Kind</th>
+            <th>Detail</th>
+            <th>State</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch (e) { console.error('ks-history', e); }
+}
+
+// ============================================================
+// Tab persistence (localStorage)
+// ============================================================
+// On page load, restore whichever tab was last active. The theme
+// toggle already persists to localStorage (see earlier code); this
+// mirrors that behaviour for tab selection so a refresh doesn't
+// reset what the operator was looking at.
+(function installTabPersistence() {
+  const STORAGE_KEY = 'rt-dashboard-active-tab';
+
+  function activateTab(name) {
+    const btns = document.querySelectorAll('.tab-btn');
+    const tabs = document.querySelectorAll('.tab');
+    btns.forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+    tabs.forEach(t => t.classList.toggle('active', t.id === 'tab-' + name));
+  }
+
+  // Restore on boot
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (saved === 'trading' || saved === 'system') activateTab(saved);
+
+  // Persist on click — the existing tab-button click handlers set
+  // classes; we add a second handler that stores the choice.
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const name = btn.dataset.tab;
+      if (name) localStorage.setItem(STORAGE_KEY, name);
+    });
+  });
+})();
+
+// ============================================================
+// Log filter buttons
+// ============================================================
+// Applies a client-side classname filter to log-line elements based
+// on a tag category stored on each line (level / kind). The underlying
+// journalctl -f stream keeps running so switching filters does not
+// drop events — existing lines get re-shown or hidden, and new lines
+// get their visibility computed as they arrive.
+let currentLogFilter = 'all';
+
+function logLineMatches(lineEl, filter) {
+  if (filter === 'all') return true;
+  if (filter === 'error') return lineEl.querySelector('.log-level.ERROR') !== null;
+  if (filter === 'warn') {
+    return lineEl.querySelector('.log-level.ERROR') !== null
+        || lineEl.querySelector('.log-level.WARN')  !== null;
+  }
+  if (filter === 'ks') {
+    const body = lineEl.querySelector('.log-body');
+    if (!body) return false;
+    const text = body.textContent || '';
+    return /kill[- ]?switch|panic[- ]?close|EffectivePnlBudget|hard_effective|soft_effective/i.test(text);
+  }
+  if (filter === 'fill') {
+    const body = lineEl.querySelector('.log-body');
+    if (!body) return false;
+    const text = body.textContent || '';
+    return /fill|orphan[- ]?catcher|applied_fills/i.test(text);
+  }
+  return true;
+}
+
+function applyLogFilterToAll() {
+  const lines = document.querySelectorAll('#log-panel .log-line');
+  lines.forEach(line => {
+    line.classList.toggle('is-hidden', !logLineMatches(line, currentLogFilter));
+  });
+}
+
+(function installLogFilterHandlers() {
+  document.querySelectorAll('.log-filter').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const filter = btn.dataset.filter;
+      if (!filter) return;
+      currentLogFilter = filter;
+      document.querySelectorAll('.log-filter').forEach(b => {
+        b.classList.toggle('active', b === btn);
+      });
+      applyLogFilterToAll();
+    });
+  });
+})();
+
+// ============================================================
 // Refresh scheduler
 // ============================================================
+async function refreshEffectiveAndExposure() {
+  try {
+    const [s, p] = await Promise.all([
+      fetch('/api/summary').then(r => r.json()),
+      fetch('/api/positions').then(r => r.json()),
+    ]);
+    refreshEffectivePnl(s);
+    refreshExposure(s, p);
+  } catch (e) { console.error('eff-pnl/exposure', e); }
+}
+
 async function refreshAll() {
-  // Trading tab (always refresh — it's cheap and the user might switch tabs)
+  refreshUser();
+  refreshKillSwitch();
   refreshSummary();
+  refreshEffectiveAndExposure();
   refreshPositions();
   refreshOrders();
   refreshSignals();
   refreshEquityChart();
-  // System tab
+  refreshTimeline();
+  refreshFillStats();
+  refreshFunding();
+  refreshTradePipeline();
+  refreshSignalStats();
+  refreshKillSwitchHistory();
   refreshFreshness();
   refreshServices();
   refreshTimers();

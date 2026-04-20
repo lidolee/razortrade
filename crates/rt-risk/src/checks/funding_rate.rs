@@ -116,6 +116,7 @@ mod tests {
             nav_hwm_per_unit: Decimal::from(1),
             total_units: Decimal::from(1000),
             kill_switch_active: false,
+            open_positions: Vec::new(),
         };
         (signal, market, portfolio, RiskConfig::default(), now)
     }

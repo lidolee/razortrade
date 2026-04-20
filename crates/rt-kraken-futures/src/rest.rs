@@ -413,6 +413,37 @@ impl ExecutionBroker for KrakenFuturesRestClient {
         Ok(OrderStatus::Filled)
     }
 
+    async fn get_order_by_cli_ord_id(
+        &self,
+        cli_ord_id: &str,
+    ) -> Result<Option<OpenOrderSummary>, ExecutionError> {
+        // Drop 19 — CV-A1a: Kraken Futures' v3 API has no direct
+        // "lookup-by-cli-ord-id" endpoint. We fetch the full open-orders
+        // list and filter client-side. At our volume (≤ 3 concurrent
+        // orders) this is one REST call per uncertain-resubmit and
+        // cheap.
+        let resp = self
+            .open_orders_raw()
+            .await
+            .map_err(|e| map_api_error(e, "get_order_by_cli_ord_id"))?;
+        for o in resp.open_orders {
+            if o.cli_ord_id.as_deref() == Some(cli_ord_id) {
+                let filled = o.filled_size.unwrap_or(Decimal::ZERO);
+                let remaining = o.unfilled_size.unwrap_or(Decimal::ZERO);
+                return Ok(Some(OpenOrderSummary {
+                    broker_order_id: o.order_id,
+                    instrument_symbol: o.symbol,
+                    status: from_kraken_status(o.status.as_deref().unwrap_or("received")),
+                    quantity: filled + remaining,
+                    filled_quantity: filled,
+                    limit_price: o.limit_price,
+                    cli_ord_id: o.cli_ord_id,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
     async fn open_orders(&self) -> Result<Vec<OpenOrderSummary>, ExecutionError> {
         let resp = self
             .open_orders_raw()
@@ -431,6 +462,7 @@ impl ExecutionBroker for KrakenFuturesRestClient {
                     quantity: filled + remaining,
                     filled_quantity: filled,
                     limit_price: o.limit_price,
+                    cli_ord_id: o.cli_ord_id,
                 }
             })
             .collect();

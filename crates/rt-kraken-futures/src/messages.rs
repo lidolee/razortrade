@@ -451,4 +451,9 @@ pub struct OpenOrderEntry {
     pub status: Option<String>,
     pub received_time: Option<String>,
     pub last_update_time: Option<String>,
+    /// Drop 19 — CV-A1a: Kraken echoes the client-generated id we sent
+    /// on the original `sendorder`. Present on orders we submitted
+    /// ourselves; absent for orders placed via the web UI.
+    #[serde(default)]
+    pub cli_ord_id: Option<String>,
 }

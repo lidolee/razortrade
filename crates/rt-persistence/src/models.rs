@@ -23,6 +23,11 @@ pub struct SignalRow {
     /// OF-2: optional hard expiry (ISO-8601 UTC).
     #[sqlx(default)]
     pub expires_at: Option<String>,
+    /// Drop 19 — CV-A1a: cooldown until this pending signal may be
+    /// polled again (ISO-8601 UTC). Set when an earlier submit
+    /// timed out so the orphan-catcher has time to reconcile.
+    #[sqlx(default)]
+    pub retry_after_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

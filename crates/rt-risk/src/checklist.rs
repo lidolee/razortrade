@@ -83,6 +83,16 @@ pub enum RejectionReason {
         notional_chf: Decimal,
         limit_chf: Decimal,
     },
+    /// Drop 19 — CV-A1d: the portfolio already holds an open leverage
+    /// position on the same instrument + side. Admitting a second
+    /// entry would double exposure on a persistent-trend breakout. The
+    /// operator must either let the existing position close or
+    /// manually cancel the new signal.
+    DuplicatePositionOpen {
+        instrument_symbol: String,
+        side: String,
+        existing_quantity: Decimal,
+    },
     KillSwitchActive,
     InvalidSignal {
         detail: String,
@@ -115,6 +125,8 @@ impl RejectionReason {
                 format!("requested leverage {requested}x exceeds cap {cap}x"),
             Self::NotionalTooLarge { notional_chf, limit_chf } =>
                 format!("notional {notional_chf} CHF exceeds per-order cap {limit_chf} CHF"),
+            Self::DuplicatePositionOpen { instrument_symbol, side, existing_quantity } =>
+                format!("already open position on {instrument_symbol} {side} (qty {existing_quantity}); refusing duplicate entry"),
             Self::KillSwitchActive =>
                 "kill-switch is active; no leveraged trades accepted".to_string(),
             Self::InvalidSignal { detail } =>
@@ -187,10 +199,14 @@ impl PreTradeChecklist {
         Self { checks }
     }
 
-    /// Build the canonical 5-point checklist in the documented order.
+    /// Build the canonical pre-trade checklist in the documented order.
     ///
     /// Order matters for human-readable log output but not for correctness:
     /// every check is always evaluated.
+    ///
+    /// Drop 19 — CV-A1d: `DuplicatePositionCheck` added after
+    /// `HardLimitCheck` so that a duplicate-position rejection is
+    /// surfaced alongside (not before) the hard-budget decision.
     pub fn standard() -> Self {
         use crate::checks::*;
         Self::new(vec![
@@ -198,6 +214,7 @@ impl PreTradeChecklist {
             Box::new(SpreadLiquidityCheck),
             Box::new(VolatilityRegimeCheck),
             Box::new(HardLimitCheck),
+            Box::new(DuplicatePositionCheck),
             Box::new(FundingRateCheck),
             Box::new(NotionalCapCheck),
         ])

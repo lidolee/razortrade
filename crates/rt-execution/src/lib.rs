@@ -80,6 +80,26 @@ pub trait Broker: Send + Sync {
     /// Fetch the current state of a specific order.
     async fn get_order(&self, broker_order_id: &str) -> Result<OrderStatus, ExecutionError>;
 
+    /// Drop 19 — CV-A1a: Look up an order by its client-generated id.
+    ///
+    /// Used by the uncertain-resubmit path in `signal_processor`:
+    /// after a REST-submit timeout we do not know whether the broker
+    /// accepted the order. Before re-submitting we ask the broker via
+    /// its open-orders listing (filtered by our cli_ord_id). If the
+    /// broker has it, we adopt the broker_order_id and mark the local
+    /// order acknowledged. If it is absent, we re-submit with the same
+    /// cli_ord_id — venue-side uniqueness of cli_ord_id prevents a
+    /// genuine double-submit.
+    ///
+    /// Returns `None` when the broker has no open order with this
+    /// cli_ord_id. An `Err` means the lookup itself failed (network,
+    /// auth, etc.) — the caller must extend the cooldown and retry
+    /// later.
+    async fn get_order_by_cli_ord_id(
+        &self,
+        cli_ord_id: &str,
+    ) -> Result<Option<OpenOrderSummary>, ExecutionError>;
+
     /// List all open orders. Used for reconciliation after reconnect or restart.
     async fn open_orders(&self) -> Result<Vec<OpenOrderSummary>, ExecutionError>;
 
@@ -96,4 +116,7 @@ pub struct OpenOrderSummary {
     pub quantity: Decimal,
     pub filled_quantity: Decimal,
     pub limit_price: Option<Decimal>,
+    /// Drop 19 — CV-A1a: echo of the client-generated id so the
+    /// reconciliation logic can match back to the local order row.
+    pub cli_ord_id: Option<String>,
 }

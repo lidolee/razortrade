@@ -34,6 +34,33 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+/// Drop 19 — CV-A1d: minimal summary of an open leverage position,
+/// used by the `duplicate_position` pre-trade check to reject a second
+/// entry on the same instrument + side while a position is live.
+///
+/// Intentionally narrow: symbol + signed quantity is enough to derive
+/// side. Full entry price / unrealised PnL / leverage are already
+/// accounted for by the sleeve-level aggregates elsewhere in
+/// `PortfolioState`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenPositionSummary {
+    pub instrument_symbol: String,
+    pub sleeve: Sleeve,
+    /// Signed quantity: positive = long, negative = short.
+    /// Stored as a string to match the rest of the domain types which
+    /// round-trip through SQLite's TEXT-decimal encoding without loss.
+    pub quantity: Decimal,
+}
+
+impl OpenPositionSummary {
+    pub fn is_long(&self) -> bool {
+        self.quantity.is_sign_positive() && !self.quantity.is_zero()
+    }
+    pub fn is_short(&self) -> bool {
+        self.quantity.is_sign_negative()
+    }
+}
+
 /// Aggregated state of a single sleeve.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SleeveState {
@@ -80,6 +107,12 @@ pub struct PortfolioState {
     /// Whether the kill-switch has been tripped. When true, no new orders
     /// for the leverage sleeve will pass the checklist.
     pub kill_switch_active: bool,
+
+    /// Drop 19 — CV-A1d: open positions across sleeves, used by the
+    /// `duplicate_position` pre-trade check. `Vec::new()` is a valid
+    /// cold-start value (no open positions).
+    #[serde(default)]
+    pub open_positions: Vec<OpenPositionSummary>,
 }
 
 impl PortfolioState {
@@ -164,6 +197,7 @@ mod tests {
             nav_hwm_per_unit: nav_hwm,
             total_units: Decimal::from(1_000),
             kill_switch_active: false,
+            open_positions: Vec::new(),
         }
     }
 

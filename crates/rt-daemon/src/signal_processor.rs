@@ -50,6 +50,27 @@ pub struct SignalProcessor {
     crypto_leverage_broker: Option<Arc<dyn Broker>>,
 }
 
+/// Drop 19 — CV-A1a: outcome of reconciling an uncertain order at the
+/// start of the submit path. See `SignalProcessor::try_reconcile_uncertain_order`.
+#[derive(Debug)]
+enum UncertainReconcileOutcome {
+    /// No existing order row for this signal — proceed to fresh submit.
+    NoExistingOrder,
+    /// Existing order is already in a terminal-forward state (orphan-
+    /// catcher or Kraken lookup resolved it), or otherwise the caller
+    /// must not submit on this tick.
+    AlreadyReconciled,
+    /// Existing order is `uncertain` and Kraken doesn't have it —
+    /// caller should submit reusing this order_id + same cli_ord_id.
+    ResubmitWithOrderId(i64),
+    /// Broker lookup itself failed. Signal cooldown has been extended;
+    /// caller returns.
+    LookupFailedRetry,
+    /// Existing uncertain order has no cli_ord_id — cannot correlate;
+    /// signal has been rejected; caller returns.
+    MalformedUnrecoverable,
+}
+
 impl SignalProcessor {
     pub fn new(
         db: Arc<Database>,
@@ -96,7 +117,8 @@ impl SignalProcessor {
     }
 
     async fn poll_once(&self) -> anyhow::Result<()> {
-        let pending = self.db.pending_signals(64).await?;
+        let now_iso = Utc::now().to_rfc3339();
+        let pending = self.db.pending_signals(64, &now_iso).await?;
         if pending.is_empty() {
             return Ok(());
         }
@@ -157,6 +179,14 @@ impl SignalProcessor {
                 return Ok(());
             }
         }
+
+        // The Drop-19 uncertain-order reconciliation lives in
+        // `submit_via_broker::try_reconcile_uncertain_order` — we
+        // cannot run it here because we don't yet know if the signal
+        // will survive the market-data + checklist gates below. Doing
+        // the reconcile here would mean reconciling uncertain orders
+        // for signals that get rejected downstream, which is wasteful
+        // and could mutate order rows for signals we never submit.
 
         // --- Build MarketSnapshot --------------------------------------
         let market = match self
@@ -263,6 +293,148 @@ impl SignalProcessor {
         }
     }
 
+    /// Drop 19 — CV-A1a: reconcile an uncertain order if one exists for
+    /// this signal. Outcomes steer the caller in `submit_via_broker`:
+    ///
+    /// | Outcome                     | Caller action                 |
+    /// |-----------------------------|-------------------------------|
+    /// | `NoExistingOrder`           | fresh submit, insert new row  |
+    /// | `AlreadyReconciled`         | return immediately            |
+    /// | `ResubmitWithOrderId(id)`   | submit into existing order_id |
+    /// | `LookupFailedRetry`         | return; cooldown extended     |
+    /// | `MalformedUnrecoverable`    | return; signal already flagged|
+    ///
+    /// The method keeps its own copy of the broker so the caller does
+    /// not need to juggle mutable state. All side effects (signal /
+    /// order mutations, cooldown) happen inside.
+    async fn try_reconcile_uncertain_order(
+        &self,
+        signal: &Signal,
+        broker: &dyn Broker,
+    ) -> anyhow::Result<UncertainReconcileOutcome> {
+        let existing = self.db.pending_order_for_signal(signal.id).await?;
+        let (existing_order_id, existing_status, existing_cli) = match existing {
+            Some(row) => row,
+            None => return Ok(UncertainReconcileOutcome::NoExistingOrder),
+        };
+
+        match existing_status.as_str() {
+            "acknowledged" | "partially_filled" | "filled" | "submitted" => {
+                // Orphan-catcher already adopted the broker-side order
+                // (via cli_ord_id match on a fill event) and promoted
+                // the status. The signal is effectively done; mark it
+                // processed so it stops appearing in pending_signals.
+                info!(
+                    signal_id = signal.id,
+                    existing_order_id,
+                    existing_status = %existing_status,
+                    "signal has an in-flight or filled order already; marking processed"
+                );
+                let now_iso = Utc::now().to_rfc3339();
+                self.db.mark_signal_processed(signal.id, &now_iso).await?;
+                self.db.clear_signal_retry_after(signal.id).await?;
+                Ok(UncertainReconcileOutcome::AlreadyReconciled)
+            }
+            "uncertain" => {
+                let cli = match existing_cli {
+                    Some(c) => c,
+                    None => {
+                        error!(
+                            signal_id = signal.id,
+                            existing_order_id,
+                            "uncertain order has no cli_ord_id; refusing to resubmit"
+                        );
+                        let reason = serde_json::json!({
+                            "kind": "uncertain_without_cli",
+                            "order_id": existing_order_id,
+                        });
+                        self.db
+                            .mark_signal_rejected(
+                                signal.id,
+                                &Utc::now().to_rfc3339(),
+                                &reason.to_string(),
+                            )
+                            .await?;
+                        return Ok(UncertainReconcileOutcome::MalformedUnrecoverable);
+                    }
+                };
+
+                info!(
+                    signal_id = signal.id,
+                    existing_order_id,
+                    cli_ord_id = %cli,
+                    "Drop-19 uncertain-resubmit: checking Kraken for order presence"
+                );
+                match broker.get_order_by_cli_ord_id(&cli).await {
+                    Ok(Some(open)) => {
+                        let now_iso = Utc::now().to_rfc3339();
+                        self.db
+                            .backfill_broker_order_id(
+                                existing_order_id,
+                                &open.broker_order_id,
+                                &now_iso,
+                            )
+                            .await?;
+                        self.db.mark_signal_processed(signal.id, &now_iso).await?;
+                        self.db.clear_signal_retry_after(signal.id).await?;
+                        info!(
+                            signal_id = signal.id,
+                            existing_order_id,
+                            broker_order_id = %open.broker_order_id,
+                            "uncertain-resubmit: Kraken confirmed order; adopted via backfill"
+                        );
+                        Ok(UncertainReconcileOutcome::AlreadyReconciled)
+                    }
+                    Ok(None) => {
+                        info!(
+                            signal_id = signal.id,
+                            existing_order_id,
+                            cli_ord_id = %cli,
+                            "uncertain-resubmit: Kraken has no such order; will resubmit same row + cli_ord_id"
+                        );
+                        Ok(UncertainReconcileOutcome::ResubmitWithOrderId(
+                            existing_order_id,
+                        ))
+                    }
+                    Err(e) => {
+                        warn!(
+                            signal_id = signal.id,
+                            existing_order_id,
+                            error = %e,
+                            "uncertain-resubmit: broker.get_order_by_cli_ord_id failed; extending cooldown"
+                        );
+                        let retry_at =
+                            (Utc::now() + chrono::Duration::seconds(90)).to_rfc3339();
+                        self.db
+                            .set_signal_retry_after(signal.id, &retry_at)
+                            .await?;
+                        Ok(UncertainReconcileOutcome::LookupFailedRetry)
+                    }
+                }
+            }
+            "pending_submission" => {
+                // Defensive: another process or thread might still be
+                // in flight. We don't have a multi-process story but
+                // keep the path clean: skip this tick.
+                warn!(
+                    signal_id = signal.id,
+                    existing_order_id,
+                    "signal has a pending_submission order already; skipping this tick"
+                );
+                Ok(UncertainReconcileOutcome::AlreadyReconciled)
+            }
+            other => {
+                warn!(
+                    signal_id = signal.id,
+                    existing_order_id,
+                    status = %other,
+                    "pending_order_for_signal returned unexpected status; skipping"
+                );
+                Ok(UncertainReconcileOutcome::AlreadyReconciled)
+            }
+        }
+    }
+
     /// Real broker submission path (Paper and Live).
     ///
     /// Currently only the `CryptoLeverage` sleeve is implemented; `CryptoSpot`
@@ -324,6 +496,25 @@ impl SignalProcessor {
             }
         };
 
+        // -- Drop 19 CV-A1a: reconcile any pre-existing uncertain order
+        //                   for this signal BEFORE we build a fresh one.
+        //
+        // If the signal already has an `uncertain` order row (previous
+        // submit timed out), we either resolve it via Kraken's REST
+        // open-orders lookup or fall through to a resubmit that reuses
+        // the same order row + same deterministic cli_ord_id. This
+        // prevents the Drop-18 doubled-position-via-new-order-row bug.
+        let resubmit_into_order_id: Option<i64> = match self
+            .try_reconcile_uncertain_order(signal, broker.as_ref())
+            .await?
+        {
+            UncertainReconcileOutcome::AlreadyReconciled => return Ok(()),
+            UncertainReconcileOutcome::LookupFailedRetry => return Ok(()),
+            UncertainReconcileOutcome::MalformedUnrecoverable => return Ok(()),
+            UncertainReconcileOutcome::NoExistingOrder => None,
+            UncertainReconcileOutcome::ResubmitWithOrderId(id) => Some(id),
+        };
+
         // -- Build the order with Kraken-Futures contract semantics ------
         let order = match build_kraken_futures_order(signal, market) {
             Ok(o) => o,
@@ -347,27 +538,43 @@ impl SignalProcessor {
         // orders on Kraken and match them by cli_ord_id. For now we rely
         // on the manual operator check; this is acceptable for demo /
         // 300-CHF phase.
+        //
+        // Drop 19 — CV-A1a: if the uncertain-resubmit path above set
+        // resubmit_into_order_id, we reuse the existing order row
+        // instead of inserting a new one. The row's status is still
+        // `uncertain` — the broker-call result below will drive it
+        // forward.
         let now_iso = Utc::now().to_rfc3339();
         let order_type_str = enum_to_snake_case(&order.order_type)?;
         let tif_str = enum_to_snake_case(&order.time_in_force)?;
         let side_str = enum_to_snake_case(&order.side)?;
 
-        let order_id = self
-            .db
-            .insert_pending_order(
-                Some(signal.id),
-                "kraken_futures",
-                &order.instrument.symbol,
-                &side_str,
-                &order_type_str,
-                &tif_str,
-                &order.quantity.to_string(),
-                order.limit_price.map(|p| p.to_string()).as_deref(),
-                None,
-                &now_iso,
-                order.cli_ord_id.as_deref(),
-            )
-            .await?;
+        let order_id = match resubmit_into_order_id {
+            Some(id) => {
+                info!(
+                    order_id = id,
+                    signal_id = signal.id,
+                    "resubmitting uncertain order (same cli_ord_id, same row)"
+                );
+                id
+            }
+            None => self
+                .db
+                .insert_pending_order(
+                    Some(signal.id),
+                    "kraken_futures",
+                    &order.instrument.symbol,
+                    &side_str,
+                    &order_type_str,
+                    &tif_str,
+                    &order.quantity.to_string(),
+                    order.limit_price.map(|p| p.to_string()).as_deref(),
+                    None,
+                    &now_iso,
+                    order.cli_ord_id.as_deref(),
+                )
+                .await?,
+        };
 
         info!(
             order_id,
@@ -398,21 +605,70 @@ impl SignalProcessor {
                 self.db
                     .mark_signal_processed(signal.id, &submit_iso)
                     .await?;
+                self.db.clear_signal_retry_after(signal.id).await?;
             }
             Err(err) => {
-                error!(order_id, error = %err, "broker rejected or failed order submission");
                 let err_string = err.to_string();
-                self.db
-                    .mark_order_failed(order_id, &err_string, &submit_iso)
-                    .await?;
-                let reason = serde_json::json!({
-                    "kind": broker_error_kind(&err),
-                    "order_id": order_id,
-                    "detail": err_string,
-                });
-                self.db
-                    .mark_signal_rejected(signal.id, &submit_iso, &reason.to_string())
-                    .await?;
+                let err_kind = broker_error_kind(&err);
+                // Drop 19 — CV-A1a: distinguish transient uncertainty
+                // (Timeout, Network) from genuine rejections. For the
+                // uncertain case, Kraken may have placed the order
+                // despite our missed response; marking it `failed` and
+                // rejecting the signal would invite a doubled position
+                // on the next 4h candle via a fresh Python signal. We
+                // instead:
+                //   1. flag the order `uncertain` with the error string,
+                //   2. keep the signal in `pending` status,
+                //   3. set `retry_after_at = now + 90s` so the processor
+                //      doesn't hammer the same signal in the poll loop.
+                // During the cooldown the WS fill feed has a chance to
+                // confirm the broker-side outcome. If a fill arrives
+                // with our cli_ord_id, the orphan-catcher in
+                // fill_reconciler will backfill broker_order_id and
+                // promote the status from `uncertain` to `acknowledged`
+                // (see repo.rs backfill_broker_order_id Drop-19 change).
+                // If no fill arrives, after the cooldown the processor
+                // calls broker.get_order(…) via the uncertain-resubmit
+                // path at the top of process_signal to decide between
+                // reconcile and resubmit.
+                let is_uncertain = matches!(
+                    err,
+                    ExecutionError::Timeout { .. } | ExecutionError::Network(_)
+                );
+                if is_uncertain {
+                    warn!(
+                        order_id,
+                        signal_id = signal.id,
+                        error_kind = err_kind,
+                        error = %err_string,
+                        "broker submit uncertain (timeout/network); marking order=uncertain and signal cooldown 90s"
+                    );
+                    self.db
+                        .mark_order_uncertain(order_id, &err_string, &submit_iso)
+                        .await?;
+                    let retry_at = (Utc::now() + chrono::Duration::seconds(90)).to_rfc3339();
+                    self.db
+                        .set_signal_retry_after(signal.id, &retry_at)
+                        .await?;
+                } else {
+                    error!(
+                        order_id,
+                        error_kind = err_kind,
+                        error = %err_string,
+                        "broker rejected order submission; marking order=failed, signal=rejected"
+                    );
+                    self.db
+                        .mark_order_failed(order_id, &err_string, &submit_iso)
+                        .await?;
+                    let reason = serde_json::json!({
+                        "kind": err_kind,
+                        "order_id": order_id,
+                        "detail": err_string,
+                    });
+                    self.db
+                        .mark_signal_rejected(signal.id, &submit_iso, &reason.to_string())
+                        .await?;
+                }
             }
         }
 
