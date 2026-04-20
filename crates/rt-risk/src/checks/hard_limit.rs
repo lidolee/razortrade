@@ -82,8 +82,17 @@ impl PreTradeCheck for HardLimitCheck {
 
         // --- Guard 4: worst-case projection on top of effective P&L -------
         // Position notional = notional_chf × leverage.
+        //
+        // Drop 19 LF-A2: worst_case_loss enthält neben dem Adverse-Move
+        // auch die erwarteten Gebühren (round-trip) und eine
+        // Funding-Reserve. Sonst würde ein Trade der "gerade eben noch"
+        // passt durch Gebühren allein ins Minus rutschen und das Kill-
+        // Switch-Budget verletzen.
         let notional = ctx.signal.notional_chf * ctx.signal.leverage;
-        let worst_case_loss = notional * ctx.config.adverse_move_for_worst_case;
+        let adverse_loss = notional * ctx.config.adverse_move_for_worst_case;
+        let fee_reserve = notional * ctx.config.expected_round_trip_fee_fraction;
+        let funding_reserve = notional * ctx.config.expected_funding_reserve_fraction;
+        let worst_case_loss = adverse_loss + fee_reserve + funding_reserve;
         // Subtract (loss is a positive number representing CHF lost).
         let projected = effective - worst_case_loss;
 
@@ -297,5 +306,37 @@ mod tests {
         );
         let ctx = PreTradeContext { signal: &s, market: &m, portfolio: &p, config: &c, now: n };
         assert_eq!(HardLimitCheck.evaluate(&ctx), CheckOutcome::Approved);
+    }
+
+    /// Drop 19 LF-A2: ein Trade der ohne Fees/Funding knapp passen
+    /// würde, muss mit der Reserve abgelehnt werden.
+    ///
+    /// Szenario: effective = -790, budget = -1000, headroom = 210.
+    /// Adverse-Move 10% × notional 2000 = 200. Ohne Reserve: projected
+    /// = -990 > -1000 → approve. Mit Reserve 0.003 × 2000 = 6 CHF:
+    /// projected = -996 > -1000 → approve noch.
+    /// Also schärfer: effective = -795.
+    /// Ohne Reserve: projected = -995 > -1000 (approve).
+    /// Mit Reserve: projected = -1001 ≤ -1000 (reject).
+    #[test]
+    fn fees_plus_funding_reserve_tips_over_budget() {
+        let (s, m, p, c, n) = build_ctx(
+            Sleeve::CryptoLeverage, Decimal::from(1000), Decimal::from(2),
+            Decimal::ZERO, Decimal::from(-795), par(), par(),
+        );
+        let ctx = PreTradeContext { signal: &s, market: &m, portfolio: &p, config: &c, now: n };
+        match HardLimitCheck.evaluate(&ctx) {
+            CheckOutcome::Rejected(
+                RejectionReason::WorstCaseLossWouldExhaustBudget {
+                    projected_loss_chf, remaining_budget_chf,
+                }
+            ) => {
+                // 10% adverse + 0.10% fees + 0.20% funding = 10.30% × 2000 = 206
+                assert_eq!(projected_loss_chf, Decimal::from(206));
+                // headroom from -795 to -1000 = 205 CHF
+                assert_eq!(remaining_budget_chf, Decimal::from(205));
+            }
+            other => panic!("expected worst-case rejection incl. reserves, got {:?}", other),
+        }
     }
 }

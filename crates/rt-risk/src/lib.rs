@@ -136,10 +136,40 @@ pub struct RiskConfig {
     /// damit alte Configs nicht brechen.
     #[serde(default = "default_min_liq_distance_atrs")]
     pub min_liq_distance_atrs: Decimal,
+
+    /// Drop 19 LF-A2: erwartete Round-Trip-Gebühren auf einem
+    /// Leverage-Trade, als Bruchteil des Notionals. Deckt Open + Close
+    /// als Taker ab. Kraken Futures aktuell ca. 0.05% Taker pro Leg
+    /// → 0.001 = 0.10% round-trip. Wird im Hard-Limit-Check zum
+    /// worst_case_loss addiert, damit ein Trade der "gerade eben noch"
+    /// ins Budget passen würde nicht durch Gebühren allein das
+    /// Kill-Switch-Budget reissen kann. Default 0.001 (0.10%).
+    #[serde(default = "default_expected_round_trip_fee_fraction")]
+    pub expected_round_trip_fee_fraction: Decimal,
+
+    /// Drop 19 LF-A2: erwartete Funding-Kosten auf einem typischen
+    /// Halt eines Leverage-Trades, als Bruchteil des Notionals.
+    /// Kraken-Futures Funding akkumuliert alle 8h. Bei einer geplanten
+    /// Haltedauer von ~24h sind das 3 Funding-Windows. Bei typischen
+    /// 2-3 bps pro 8h + Adverse-Drift-Annahme ergibt sich grob 0.002
+    /// = 0.20% reserviertes Funding. Wird wie die Fee-Reserve zum
+    /// worst_case_loss addiert. Default 0.002 (0.20%).
+    #[serde(default = "default_expected_funding_reserve_fraction")]
+    pub expected_funding_reserve_fraction: Decimal,
 }
 
 fn default_min_liq_distance_atrs() -> Decimal {
     Decimal::from(2)
+}
+
+fn default_expected_round_trip_fee_fraction() -> Decimal {
+    // 0.001 = 0.10% round-trip (ca. 0.05% × 2 legs, Taker)
+    Decimal::new(1, 3)
+}
+
+fn default_expected_funding_reserve_fraction() -> Decimal {
+    // 0.002 = 0.20% pro erwartetem ~24h-Halt
+    Decimal::new(2, 3)
 }
 
 fn default_max_notional_chf_per_order() -> Decimal {
@@ -182,6 +212,8 @@ impl Default for RiskConfig {
             kill_switch_effective_threshold_chf:
                 default_kill_switch_effective_threshold_chf(),
             min_liq_distance_atrs: default_min_liq_distance_atrs(),
+            expected_round_trip_fee_fraction: default_expected_round_trip_fee_fraction(),
+            expected_funding_reserve_fraction: default_expected_funding_reserve_fraction(),
         }
     }
 }
