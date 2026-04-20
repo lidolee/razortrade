@@ -1,61 +1,108 @@
 # razortrade
 
-Systematic trading daemon for a hybrid crypto + ETF portfolio. Rust execution
-layer, Python signal generation, SQLite as the integration seam. Built for
-Rocky Linux 9 + Hetzner VPS deployment.
+Systematischer Algo-Trader für Kraken Futures. Rust-Execution-Layer, Python-Signal-Generierung, SQLite als Integrations-Schicht. Built für Rocky Linux 10 auf einem einzelnen Hetzner-VPS.
 
-## Architecture in one paragraph
+**Status April 2026:** Paper-Trading gegen Kraken Demo, Live-Gate geplant nach Drop-19-Remediation.
 
-Python calculates strategy signals every 4h and writes them to a SQLite
-table. Rust polls that table at 1 Hz, runs every signal through a hardcoded
-5-point pre-trade checklist, and either submits the order to Kraken Futures
-/ IBKR or records a structured rejection. A separate kill-switch supervisor
-runs every 60 s and disables the leverage sleeve if either the lifetime
-realized-loss budget (-1000 CHF) or the portfolio-wide drawdown (20%) is
-breached. The spot-accumulation sleeves continue to operate independently.
+---
 
-See `docs/ARCHITECTURE.md` for the full design.
+## Wo liegt was — Quick Reference
 
-## Crate layout
+| Was | Wo |
+|---|---|
+| Source-Repo (lokal) | `~/Workspace/razortrade` |
+| Prod-Host | `linda@178.105.6.124` (Hetzner CX32, Rocky Linux 10.1) |
+| Domain Dashboard | https://trader.ghazzo.ch (Google OAuth, Whitelist-basiert) |
+| SQLite-DB (Prod) | `/var/lib/razortrade/razortrade.sqlite` |
+| Daemon-Config (Prod) | `/etc/razortrade/daemon.toml` (mode 0640, group `razortrade`) |
+| Secrets (Prod) | `/etc/razortrade/secrets.env` (mode 0600, **nie committen**) |
+| Daemon-Binary (Prod) | `/usr/bin/rt-daemon` |
+| Dashboard-Binary (Prod) | `/usr/bin/rt-dashboard` |
+| Python-Scripts (Prod) | `/usr/libexec/razortrade/` |
+| Backups lokal (Prod) | `/var/lib/razortrade/backups/` |
+| Systemd-Units | `/usr/lib/systemd/system/{rt-daemon,rt-dashboard,razortrade-signals,razortrade-backup}.{service,timer}` |
+| Caddy-Config | `/etc/caddy/Caddyfile` |
+| oauth2-proxy | `/etc/oauth2-proxy/oauth2-proxy.cfg` + `.env` + `allowed_emails` |
+| Dokumentation | `docs/ARCHITECTURE.md`, `docs/BUILDING.md`, `docs/OPERATIONS.md`, `docs/SECRETS.md` |
+| Aktuelle TODO | `DROP_19_TODO.md` |
+| Audit-Historie | `AUDIT_2026_04_20.md` + `DROP_18_DEPLOY.md` + `SESSION_CLOSEOUT.md` |
+
+---
+
+## Architektur in einem Absatz
+
+Python rechnet alle 4h Donchian-Breakout-Signale und schreibt sie in die SQLite-Tabelle `signals`. Rust (`rt-daemon`) pollt diese Tabelle im 1-Hz-Takt, validiert jedes Signal durch eine 5-Punkte-Checkliste und submitted bei Approval einen Limit-Order an Kraken Futures. Ein Kill-Switch-Supervisor läuft alle 60s und disabled den Leverage-Sleeve, wenn entweder der Lifetime-Realisierter-Loss-Budget (-1000 CHF, soft) oder der Effective-PnL-Threshold (-1200 CHF, hard → panic-close aller offenen Positionen) oder die Portfolio-Drawdown-Grenze (20 %) breached werden. Fills kommen über Kraken WebSocket, werden per Fill-Reconciler idempotent in `applied_fills` + `orders` + `positions` persistiert. Ein read-only Rust/Axum-Dashboard zeigt Portfolio-State hinter Google OAuth + Caddy-TLS.
+
+Volle Design-Diskussion: `docs/ARCHITECTURE.md`.
+
+---
+
+## Crate-Layout
 
 ```
 crates/
-├── rt-core            Domain types (Order, Signal, Position, MarketSnapshot, …)
-├── rt-risk            Pre-trade checklist, kill-switch, ATR position sizing
-├── rt-persistence     SQLite + migrations + typed repository
-├── rt-execution       Broker trait definition
-├── rt-kraken-futures  Kraken Futures WS + REST client (Broker impl)
-└── rt-daemon          Main binary; wires everything together
+├── rt-core            Domain-Typen (Order, Signal, Position, MarketSnapshot, Sleeve, Side, …)
+├── rt-risk            Pre-Trade-Checklist, Kill-Switch, ATR-Position-Sizing
+├── rt-persistence     SQLite + Migrations + typisierter Repository
+├── rt-execution       Broker-Trait (async_trait)
+├── rt-kraken-futures  Kraken-Futures WS + REST Client (Broker-Impl)
+├── rt-daemon          Main-Binary; verdrahtet alles
+└── rt-dashboard       Read-only Portfolio-Viewer (Axum, HTML/JS)
 ```
 
-Planned but not yet in the repo: `rt-ibkr` (Interactive Brokers Client
-Portal Web API) for the ETF sleeve.
+**Nicht im Repo:** `rt-ibkr` (Interactive-Brokers-ETF-Sleeve) — vertagt.
 
-## Build
+---
 
-Requires Rust 1.82 (pinned in `rust-toolchain.toml`).
+## Build & Deploy — Kurzreferenz
+
+### Lokaler Build
 
 ```bash
+cd ~/Workspace/razortrade
 cargo check --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release -p rt-daemon
+cargo build --release -p rt-dashboard
 ```
 
-The test suite covers:
-- Every domain-type invariant (`rt-core`).
-- Every pre-trade check against at least 3 scenarios (approval, rejection,
-  boundary) (`rt-risk`).
-- Kill-switch evaluator against all trigger paths.
+### RPMs bauen
 
-There are currently **no** integration tests against real broker APIs.
-Those require sandbox credentials and live in a separate repository.
+```bash
+cargo generate-rpm -p crates/rt-daemon
+cargo generate-rpm -p crates/rt-dashboard
+ls -la target/generate-rpm/*.rpm
+```
 
-## Local development
+Rust-Toolchain gepinnt auf 1.82 (siehe `rust-toolchain.toml`). `cargo-generate-rpm` muss installiert sein (`cargo install cargo-generate-rpm`). Build-Host-Kompatibilität: Rocky 9 oder 10, x86_64. Details in `docs/BUILDING.md`.
 
-The repository ships a `deploy/daemon.toml.local.example` tuned for running
-out of the repo checkout — SQLite in `./var/`, Kraken demo WS, dry-run
-execution mode. To use it:
+### Auf Prod deployen
+
+```bash
+scp target/generate-rpm/rt-daemon-*.rpm linda@178.105.6.124:/tmp/
+scp target/generate-rpm/rt-dashboard-*.rpm linda@178.105.6.124:/tmp/
+ssh linda@178.105.6.124 '
+sudo dnf reinstall -y /tmp/rt-daemon-*.rpm
+sudo dnf reinstall -y /tmp/rt-dashboard-*.rpm
+sudo systemctl daemon-reload
+sudo systemctl restart rt-daemon.service rt-dashboard.service
+sleep 3
+systemctl is-active rt-daemon rt-dashboard razortrade-signals.timer razortrade-backup.timer caddy oauth2-proxy
+'
+```
+
+Erwartetes Output: 6× `active`.
+
+Siehe `docs/OPERATIONS.md` für Schema-Migrations + Rollback-Prozedur.
+
+---
+
+## Lokale Entwicklung
+
+Siehe `docs/OPERATIONS.md` Abschnitt "Lokaler Dev-Loop".
+
+Kurzform mit Dry-Run-Config:
 
 ```bash
 cp deploy/daemon.toml.local.example deploy/daemon.toml.local
@@ -64,139 +111,94 @@ export RT_DAEMON_CONFIG=$(pwd)/deploy/daemon.toml.local
 RUST_LOG=info,rt_=debug,sqlx=warn cargo run -p rt-daemon
 ```
 
-`daemon.toml.local` is gitignored, so you can edit it freely.
-
-### Phase 3a: end-to-end smoke test
-
-This is the first real proof that the wiring works. You need two
-terminals.
-
-**Terminal 1 — start the daemon:**
+In einem zweiten Terminal:
 
 ```bash
-cd ~/Workspace/razortrade
-cp deploy/daemon.toml.local.example deploy/daemon.toml.local  # once
-mkdir -p ./var                                                 # once
-export RT_DAEMON_CONFIG=$(pwd)/deploy/daemon.toml.local
-RUST_LOG=info,rt_=debug,sqlx=warn cargo run -p rt-daemon
-```
-
-The daemon starts, creates `./var/razortrade.sqlite`, runs all migrations,
-tries to connect to `wss://demo-futures.kraken.com/ws/v1`, and begins
-polling the `signals` table at 1 Hz. Logs are JSON — pipe through `jq`
-in another pane if you want them pretty:
-`journalctl -f | jq` style doesn't apply here; for `cargo run` output
-use `cargo run -p rt-daemon 2>&1 | tee >(jq -R 'fromjson? // .')`.
-
-**Terminal 2 — inject one signal:**
-
-```bash
-cd ~/Workspace/razortrade
 python3 tools/inject_test_signal.py
 ```
 
-This writes exactly one row into `signals` with realistic metadata
-(ATR, FX rate, leverage sleeve, BTC perpetual symbol).
+Das Signal landet in der lokalen DB, der Daemon verarbeitet es im Dry-Run-Modus — kein Broker-Call, kein Echtgeld-Risiko.
 
-**What to expect in Terminal 1 within ~1 second:**
+---
 
-```
-signal processor ... "processing pending signals" count=1
-market snapshot unavailable; signal rejected ... NoBook { symbol: "PI_XBTUSD" }
-```
-
-This rejection is the *expected* outcome: the Kraken demo WS has not
-delivered an orderbook yet at the moment of the first poll. The
-signal is marked rejected with a structured `market_data_unavailable`
-reason. The pipeline ran end-to-end.
-
-**Inspect the database:**
+## Tests
 
 ```bash
-sqlite3 ./var/razortrade.sqlite "SELECT id, status, rejection_reason FROM signals;"
-sqlite3 ./var/razortrade.sqlite "SELECT * FROM checklist_evaluations;"
-sqlite3 ./var/razortrade.sqlite "SELECT * FROM dry_run_orders;"
+cargo test --workspace                         # Rust-Unit+Integration
+python3 tools/indicators.py                    # Donchian-/ATR-Self-Tests
 ```
 
-- `signals`: one row, `status = 'rejected'`, `rejection_reason` contains
-  a JSON object with `"kind": "market_data_unavailable"`.
-- `checklist_evaluations`: empty — the checklist never ran because
-  market data was missing.
-- `dry_run_orders`: empty — no intent recorded.
+Test-Coverage (Stand Drop 18, 43 Tests grün):
+- `rt-core` — alle Domain-Typ-Invarianten
+- `rt-risk` — jeder der 5 Checks mit mind. 3 Szenarien (approve, reject, boundary)
+- `rt-risk::kill_switch` — alle Trigger-Pfade inkl. LF-1 Panic-Close
+- `rt-persistence` — Fill-Application, Orphan-Catcher, Idempotenz
+- `rt-kraken-futures::orderbook` — Sequence-Gaps, OutOfSync-Flag, Cross-Book-Detection
 
-If you leave the daemon running long enough for Kraken to push a book
-snapshot, re-injecting a signal will get further and either land in
-`checklist_evaluations` (rejection) or in `dry_run_orders` (approval).
-Either way, no broker submission happens because the execution mode is
-`dry_run`.
+**Keine Integration-Tests gegen echte Broker-APIs** in diesem Repo. Sandbox-Credentials leben in einem separaten Repo.
 
-### Phase 3b: real Donchian-breakout signals from Kraken
+---
 
-Instead of `inject_test_signal.py` (which always writes the same fake
-signal), the real signal generator pulls live BTC-perpetual candles
-from Kraken Futures public REST, computes a Donchian channel + ATR,
-and writes a signal only if the most recent close has broken out.
+## Konfiguration — sensitive Daten
 
-```bash
-# Dry run: fetch, compute, report — do NOT write
-python3 tools/donchian_signal.py
+API-Keys, OAuth-Secrets und das Cookie-Signing-Secret liegen **nicht** in committeten Dateien. Siehe `docs/SECRETS.md` für die vollständige Liste was wo hinkommt und welche Permissions.
 
-# Actually write the signal when a breakout is detected
-python3 tools/donchian_signal.py --commit
+Kurzregel:
+- Sensitive Werte in `/etc/razortrade/secrets.env` (mode 0600, owner root, group razortrade)
+- OAuth2-proxy-Secrets in `/etc/oauth2-proxy/oauth2-proxy.env` (mode 0600, owner root, group oauth2-proxy)
+- Beide Dateien werden von systemd per `EnvironmentFile=` in die Service-Units geladen
+- Das Prozess-Environment mit Secrets ist via Hardening-Direktiven (`PrivateTmp`, `NoNewPrivileges`, `ProtectSystem=strict`) abgeschirmt
 
-# Tune
-python3 tools/donchian_signal.py \
-    --symbol PI_XBTUSD --resolution 4h \
-    --donchian 20 --atr 14 \
-    --notional 300 --leverage 2 \
-    --fx-quote-per-chf 1.10 \
-    --commit
-```
+---
 
-No external Python dependencies (urllib + sqlite3 + decimal, stdlib
-only). Indicator maths lives in `tools/indicators.py` with 12 self-tests
-(run `python3 tools/indicators.py` to verify).
+## Scope & Non-Goals
 
-For automated 4-hour cadence, this script is designed to be triggered
-by a systemd user timer. That wiring will ship with the RPM package.
+**In Scope:**
+- Momentum-Trend-Following mit ≤ 2× Leverage via Kraken Futures (PI_XBTUSD)
+- Deterministische Pre-Trade-Risikochecks mit vollem Audit-Trail
+- Single-User, Single-Host, Hobby-Kapital-Skala (hunderte bis zehntausende CHF)
+- Deutsche Operator-Sprache, Schweizer Zeitzone (Europe/Zurich), CHF als Basis-Währung
 
-## Production deployment (Hetzner CX32, Rocky Linux 10)
+**Explizit NICHT in Scope:**
+- High-Frequency-Trading (Latenz-Budget hier ist 5 Sekunden, nicht 5 Mikrosekunden)
+- ML-basierte Signal-Generierung. Klassische Indikatoren, volle Transparenz.
+- Drittkapital / OPM (Other People's Money) → FINMA-Abklärung nötig, nicht unser Scope.
+- Multi-Asset-Portfolio (ETF-Sleeve vertagt, Spot-Sleeve vertagt).
+- Non-CHF-Base-Currency.
 
-See `docs/RUNBOOK.md` (not yet written). Summary:
+---
 
-```bash
-# 1. Build release binary on a matching-arch builder (amd64).
-cargo build --release -p rt-daemon
+## Wichtige Prozeduren
 
-# 2. Copy to the VPS.
-scp target/release/rt-daemon razortrade@vps:/opt/razortrade/bin/
-scp deploy/systemd/razortrade.service root@vps:/etc/systemd/system/
-scp deploy/daemon.toml.example root@vps:/etc/razortrade/daemon.toml
+Alle Prozeduren sind in `docs/OPERATIONS.md` dokumentiert. Kurz-Pointer:
 
-# 3. On the VPS:
-sudo systemctl daemon-reload
-sudo systemctl enable --now razortrade
-sudo journalctl -u razortrade -f
-```
+- **Deploy:** `docs/OPERATIONS.md` §Deploy
+- **DB-Migration:** `docs/OPERATIONS.md` §Migration
+- **Rollback bei Broken Deploy:** `docs/OPERATIONS.md` §Rollback
+- **Kill-Switch-Reset:** `docs/OPERATIONS.md` §Kill-Switch (es gibt noch keinen CLI-Tool, aktuell manueller SQL-Update)
+- **Backup-Recovery:** `docs/OPERATIONS.md` §Backup (Hetzner-Storage-Box-Push via `razortrade-backup.service`)
+- **Troubleshoot `signal_expired`-Häufung:** `docs/OPERATIONS.md` §Troubleshooting
+- **Audit-Durchführung:** `docs/OPERATIONS.md` §Audit + `HANDOVER_FOR_GEMINI.md`
 
-## Scope & non-goals
+---
 
-**In scope:**
-- Crypto spot accumulation (VCA-style) via Kraken Spot.
-- Momentum trend-following with ≤ 2x leverage via Kraken Futures.
-- ETF accumulation via Interactive Brokers.
-- Deterministic pre-trade risk checks with full audit trail.
+## Audit-Status (Stand 2026-04-20)
 
-**Explicitly NOT in scope:**
-- High-frequency trading (latency budget is 100 ms, not 100 μs).
-- ML-based signal generation. Classical indicators only for the foreseeable
-  future.
-- Third-party capital / OPM (other people's money).
-- Non-CHF base currency.
+**Drop 18** — alle P0-Findings aus dem Gemini-Audit 2026-04-19 gefixt und auf Prod deployed (`DROP_18_DEPLOY.md`).
 
-## Configuration: sensitive material
+**Drop 19** (offen) — interner Claude-Audit 2026-04-20 hat zwei neue BLOCKER identifiziert:
+- **CV-A1** REST-Timeout → Position-Verdopplung bei persistierendem Trend
+- **CV-A2** FX-Rate hartcodiert 1.10 (real ~0.78) → +41 % Position-Oversizing
 
-API keys are **not** stored in `daemon.toml`. They are read from environment
-variables (`RT_KRAKEN_API_KEY`, `RT_KRAKEN_API_SECRET`, `RT_IBKR_TOKEN`)
-which systemd loads from `/etc/razortrade/secrets.env` with mode 0600, owned
-by `razortrade:razortrade`.
+**Beide blockieren den Live-Gate.** Details + Fix-Plan in `DROP_19_TODO.md`.
+
+Live-Gate-Datum: **frühestens 72h nach Drop-19-Deploy.**
+
+---
+
+## Kontakt & Zuständigkeit
+
+- **Operator:** Walid (Einzel-Betreiber, Zürich)
+- **Letsencrypt-Mail (Caddy):** `ops@ghazzo.ch`
+- **Dashboard-Whitelist:** `/etc/oauth2-proxy/allowed_emails` (aktuell: `walid@ghazzo.ch`)
+- **Repo-Lizenz:** Proprietär, private.

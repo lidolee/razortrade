@@ -1,5 +1,14 @@
 # Architecture
 
+> **See also:**
+> - `../README.md` — Projekt-Überblick + Quick-Reference aller Pfade
+> - `OPERATIONS.md` — Deploy, Rollback, Backup, Troubleshooting
+> - `SECRETS.md` — Secret-Inventar + Rotation-Prozeduren
+> - `BUILDING.md` — RPM-Build
+> - `../DROP_19_TODO.md` — aktuelle offene Audit-Findings
+> - `../AUDIT_2026_04_20.md` — letzter Audit-Report
+> - `../HANDOVER_FOR_GEMINI.md` — Auftrag für nächsten externen Audit
+
 This document explains **why** the system is built the way it is. For
 "how to run it", see `README.md`.
 
