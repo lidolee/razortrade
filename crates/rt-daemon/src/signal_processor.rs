@@ -27,6 +27,7 @@ use rt_core::execution_mode::ExecutionMode;
 use rt_core::instrument::{AssetClass, Broker as BrokerKind, Instrument, Sleeve};
 use rt_core::market_data::MarketSnapshot;
 use rt_core::order::{Order, OrderStatus, OrderType, Side, TimeInForce};
+use rt_core::portfolio::PortfolioState;
 use rt_core::signal::{Signal, SignalStatus, SignalType};
 use rt_execution::{Broker, ExecutionError};
 use rt_persistence::models::SignalRow;
@@ -48,6 +49,10 @@ pub struct SignalProcessor {
     /// `None` in DryRun mode; required in Paper/Live mode. Startup in
     /// Paper/Live without this set is prevented by main.rs.
     crypto_leverage_broker: Option<Arc<dyn Broker>>,
+    /// Drop 19 post-audit: per-symbol instrument metadata (min_order_size,
+    /// tick_size) instead of hardcoded PI_XBTUSD values. Symbols not in
+    /// the registry fall back to PI_XBTUSD-compatible defaults.
+    instruments: Arc<rt_core::instrument_registry::InstrumentRegistry>,
 }
 
 /// Drop 19 — CV-A1a: outcome of reconciling an uncertain order at the
@@ -79,6 +84,7 @@ impl SignalProcessor {
         market_data: Arc<MarketDataService>,
         execution_mode: ExecutionMode,
         crypto_leverage_broker: Option<Arc<dyn Broker>>,
+        instruments: Arc<rt_core::instrument_registry::InstrumentRegistry>,
     ) -> Self {
         Self {
             db,
@@ -87,6 +93,7 @@ impl SignalProcessor {
             market_data,
             execution_mode,
             crypto_leverage_broker,
+            instruments,
         }
     }
 
@@ -255,7 +262,7 @@ impl SignalProcessor {
                 mode = ?self.execution_mode,
                 "signal approved by checklist"
             );
-            self.handle_approval(&signal, &market).await?;
+            self.handle_approval(&signal, &market, &portfolio).await?;
         } else {
             info!(summary = %result.summary(), "signal rejected by checklist");
             let rejection_json = serde_json::json!({
@@ -284,11 +291,12 @@ impl SignalProcessor {
         &self,
         signal: &Signal,
         market: &MarketSnapshot,
+        portfolio: &PortfolioState,
     ) -> anyhow::Result<()> {
         match self.execution_mode {
             ExecutionMode::DryRun => self.record_dry_run_intent(signal, market).await,
             ExecutionMode::Paper | ExecutionMode::Live => {
-                self.submit_via_broker(signal, market).await
+                self.submit_via_broker(signal, market, portfolio).await
             }
         }
     }
@@ -446,6 +454,7 @@ impl SignalProcessor {
         &self,
         signal: &Signal,
         market: &MarketSnapshot,
+        portfolio: &PortfolioState,
     ) -> anyhow::Result<()> {
         // -- Routing guard: only CryptoLeverage in this drop -------------
         if signal.sleeve != Sleeve::CryptoLeverage {
@@ -516,7 +525,9 @@ impl SignalProcessor {
         };
 
         // -- Build the order with Kraken-Futures contract semantics ------
-        let order = match build_kraken_futures_order(signal, market) {
+        let order = match build_kraken_futures_order(
+            signal, market, portfolio, self.instruments.as_ref(),
+        ) {
             Ok(o) => o,
             Err(reason_obj) => {
                 warn!(reason = %reason_obj, "failed to build order from signal");
@@ -904,11 +915,105 @@ fn broker_hint_for_sleeve(sleeve: Sleeve) -> &'static str {
 /// price. PostOnly guarantees maker-side execution: Kraken will reject
 /// the order rather than cross the spread, which is the safer default
 /// for the demo phase.
+/// Drop 19 LF-A3 (Turtle Exit): baut eine reduce-only Market-IOC Order
+/// zur Schliessung einer bestehenden Leverage-Position. Python-Seite
+/// (donchian_exit.py) generiert `trend_exit` Signale deren `side` die
+/// zu verwendende Close-Side ist; die exakte Quantity leiten wir hier
+/// aus der offenen Position ab, damit Python nicht mit Fill-State
+/// synchron bleiben muss.
+fn build_exit_order(
+    signal: &Signal,
+    portfolio: &PortfolioState,
+    instruments: &rt_core::instrument_registry::InstrumentRegistry,
+) -> Result<Order, serde_json::Value> {
+    use serde_json::json;
+
+    // Matching open position suchen.
+    let pos = portfolio
+        .open_positions
+        .iter()
+        .find(|p| p.instrument_symbol == signal.instrument_symbol
+            && p.sleeve == rt_core::instrument::Sleeve::CryptoLeverage
+            && p.quantity != Decimal::ZERO);
+    let pos = match pos {
+        Some(p) => p,
+        None => {
+            return Err(json!({
+                "kind": "exit_without_open_position",
+                "instrument_symbol": signal.instrument_symbol,
+            }));
+        }
+    };
+
+    // Side-Konsistenz prüfen: lange Position → sell exit, kurze → buy.
+    let expected_side = if pos.quantity > Decimal::ZERO { Side::Sell } else { Side::Buy };
+    if signal.side != expected_side {
+        return Err(json!({
+            "kind": "exit_side_mismatch",
+            "signal_side": format!("{:?}", signal.side),
+            "expected": format!("{:?}", expected_side),
+            "position_qty": pos.quantity.to_string(),
+        }));
+    }
+
+    let qty = pos.quantity.abs();
+    if qty < Decimal::ONE {
+        return Err(json!({
+            "kind": "exit_quantity_below_minimum",
+            "position_qty": pos.quantity.to_string(),
+        }));
+    }
+
+    let now = Utc::now();
+    let meta = instruments.lookup(&signal.instrument_symbol);
+    Ok(Order {
+        id: 0,
+        signal_id: Some(signal.id),
+        broker: BrokerKind::KrakenFutures,
+        broker_order_id: None,
+        cli_ord_id: Some(format!("rt-s{}", signal.id)),
+        instrument: Instrument {
+            symbol: signal.instrument_symbol.clone(),
+            broker: BrokerKind::KrakenFutures,
+            asset_class: AssetClass::CryptoPerp,
+            min_order_size: meta.min_order_size,
+            tick_size: meta.tick_size,
+        },
+        side: signal.side,
+        order_type: OrderType::Market,
+        time_in_force: TimeInForce::Ioc,
+        quantity: qty,
+        limit_price: None,
+        stop_price: None,
+        status: OrderStatus::PendingSubmission,
+        filled_quantity: Decimal::ZERO,
+        avg_fill_price: None,
+        fees_paid: Decimal::ZERO,
+        created_at: now,
+        updated_at: now,
+        error_message: None,
+        // Kraken lehnt reduce_only ab falls Order die Position flippen
+        // würde — exakt was wir wollen.
+        reduce_only: Some(true),
+    })
+}
+
 fn build_kraken_futures_order(
     signal: &Signal,
     market: &MarketSnapshot,
+    portfolio: &PortfolioState,
+    instruments: &rt_core::instrument_registry::InstrumentRegistry,
 ) -> Result<Order, serde_json::Value> {
     use serde_json::json;
+
+    // Drop 19 LF-A3: Exit-Signale (trend_exit) gehen einen komplett
+    // anderen Pfad als Entries. Sie werden aus der offenen Position
+    // abgeleitet (reduce_only=true, Market/IOC, Qty = abs(existing)),
+    // nicht aus FX × notional_chf. Erreichen das End-des-Trends-Close
+    // in der Turtle-Donchian-Philosophie.
+    if matches!(signal.signal_type, rt_core::signal::SignalType::TrendExit) {
+        return build_exit_order(signal, portfolio, instruments);
+    }
 
     // --- FX rate -----------------------------------------------------
     let fx = market.fx_quote_per_chf;
@@ -979,6 +1084,7 @@ fn build_kraken_futures_order(
     };
 
     let now = Utc::now();
+    let meta = instruments.lookup(&signal.instrument_symbol);
     Ok(Order {
         id: 0, // local id is assigned by SQLite on insert
         signal_id: Some(signal.id),
@@ -994,11 +1100,10 @@ fn build_kraken_futures_order(
             symbol: signal.instrument_symbol.clone(),
             broker: BrokerKind::KrakenFutures,
             asset_class: AssetClass::CryptoPerp,
-            // PI contracts are integer-quantity; tick size is 0.5 USD on
-            // PI_XBTUSD as of 2026. These are set here as hints and are
-            // not used by the submit path (Kraken enforces them server-side).
-            min_order_size: Decimal::ONE,
-            tick_size: Decimal::new(5, 1),
+            // Drop 19 post-audit: aus InstrumentRegistry statt
+            // hartcodiert. Fallback = PI_XBTUSD-Werte (1 / 0.5).
+            min_order_size: meta.min_order_size,
+            tick_size: meta.tick_size,
         },
         side: signal.side,
         order_type: OrderType::PostOnly,

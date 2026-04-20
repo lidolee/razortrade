@@ -51,6 +51,36 @@ struct DaemonConfig {
     risk: RiskConfig,
     #[serde(default)]
     execution: ExecutionConfig,
+    /// Drop 19 post-audit: Instrument-Metadaten (min_order_size,
+    /// tick_size) statt hartcodiert in signal_processor/main. Ohne
+    /// diese Sektion fällt der Lookup auf PI_XBTUSD-Defaults zurück,
+    /// damit bestehende Configs nicht brechen.
+    #[serde(default)]
+    instruments: Vec<InstrumentMeta>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct InstrumentMeta {
+    symbol: String,
+    /// Minimum order quantity in contracts. For PI_XBTUSD = 1.
+    min_order_size: rust_decimal::Decimal,
+    /// Price tick in quote currency. For PI_XBTUSD = 0.5.
+    tick_size: rust_decimal::Decimal,
+}
+
+impl DaemonConfig {
+    /// Lookup instrument metadata by symbol. Returns the PI_XBTUSD
+    /// legacy defaults (min_order_size=1, tick_size=0.5) if the
+    /// symbol is not declared in config — preserves behaviour for
+    /// single-instrument deployments.
+    pub fn instrument_meta(&self, symbol: &str) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+        for m in &self.instruments {
+            if m.symbol == symbol {
+                return (m.min_order_size, m.tick_size);
+            }
+        }
+        (rust_decimal::Decimal::ONE, rust_decimal::Decimal::new(5, 1))
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -89,6 +119,7 @@ impl Default for DaemonConfig {
             },
             risk: RiskConfig::default(),
             execution: ExecutionConfig::default(),
+            instruments: Vec::new(),
         }
     }
 }
@@ -183,6 +214,29 @@ async fn main() -> Result<()> {
     let checklist = Arc::new(PreTradeChecklist::standard());
     info!(checks = ?checklist.check_ids(), "pre-trade checklist built");
 
+    // ---- Instrument registry ------------------------------------------
+    // Drop 19 post-audit: hartcodierte min_order_size/tick_size raus,
+    // Lookup pro Symbol. Fallback-Defaults (PI_XBTUSD-Werte) greifen
+    // wenn das Symbol nicht in [[instruments]] deklariert ist.
+    let instruments = {
+        use rt_core::instrument_registry::{InstrumentMeta, InstrumentRegistry};
+        let mut reg = InstrumentRegistry::new();
+        for m in &config.instruments {
+            reg.insert(
+                m.symbol.clone(),
+                InstrumentMeta {
+                    min_order_size: m.min_order_size,
+                    tick_size: m.tick_size,
+                },
+            );
+        }
+        Arc::new(reg)
+    };
+    info!(
+        instrument_count = config.instruments.len(),
+        "instrument registry loaded"
+    );
+
     // ---- Kraken Futures WS client -------------------------------------
     let ws_config = {
         let mut c = WsConfig::new(config.kraken.products.clone());
@@ -264,6 +318,7 @@ async fn main() -> Result<()> {
         market_data.clone(),
         execution_mode,
         crypto_leverage_broker.clone(),
+        instruments.clone(),
     ));
 
     // ---- Shutdown plumbing --------------------------------------------
@@ -296,8 +351,9 @@ async fn main() -> Result<()> {
         // In DryRun mode no broker is present; panic-close becomes a
         // log-only warning — we still record the event for audit.
         let broker = crypto_leverage_broker.clone();
+        let instr = instruments.clone();
         tokio::spawn(async move {
-            run_kill_switch_supervisor(db, cfg, broker, interval, rx).await
+            run_kill_switch_supervisor(db, cfg, broker, interval, rx, instr).await
         })
     };
 
@@ -315,8 +371,11 @@ async fn main() -> Result<()> {
         let cfg = risk_config.clone();
         let broker_for_reconciler: Option<Arc<dyn Broker>> =
             kraken_concrete.clone().map(|c| c as Arc<dyn Broker>);
+        let instr = instruments.clone();
         tokio::spawn(async move {
-            fill_reconciler::run(db, fills, tick, rx, cfg, broker_for_reconciler).await
+            fill_reconciler::run(
+                db, fills, tick, rx, cfg, broker_for_reconciler, instr,
+            ).await
         })
     };
 
@@ -374,6 +433,7 @@ async fn run_kill_switch_supervisor(
     broker: Option<Arc<dyn Broker>>,
     interval: Duration,
     mut shutdown_rx: watch::Receiver<bool>,
+    instruments: Arc<rt_core::instrument_registry::InstrumentRegistry>,
 ) {
     info!(
         interval_secs = interval.as_secs(),
@@ -387,7 +447,9 @@ async fn run_kill_switch_supervisor(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                if let Err(e) = evaluate_kill_switch_once(&db, &config, broker.as_ref()).await {
+                if let Err(e) = evaluate_kill_switch_once(
+                    &db, &config, broker.as_ref(), &instruments,
+                ).await {
                     error!(error = %e, "kill-switch evaluation iteration failed");
                 }
             }
@@ -414,6 +476,7 @@ pub(crate) async fn evaluate_kill_switch_once(
     db: &Arc<Database>,
     config: &Arc<RiskConfig>,
     broker: Option<&Arc<dyn Broker>>,
+    instruments: &Arc<rt_core::instrument_registry::InstrumentRegistry>,
 ) -> anyhow::Result<()> {
     use rt_risk::{KillSwitchDecision, KillSwitchEvaluator, KillSwitchReason};
 
@@ -526,7 +589,7 @@ pub(crate) async fn evaluate_kill_switch_once(
                 }
             };
 
-            if let Err(e) = panic_close_leverage_positions(db, broker, event_id).await {
+            if let Err(e) = panic_close_leverage_positions(db, broker, event_id, instruments).await {
                 error!(
                     event_id,
                     error = %e,
@@ -552,6 +615,7 @@ async fn panic_close_leverage_positions(
     db: &Arc<Database>,
     broker: &Arc<dyn Broker>,
     event_id: i64,
+    instruments: &rt_core::instrument_registry::InstrumentRegistry,
 ) -> anyhow::Result<()> {
     use rt_core::instrument::{AssetClass, Broker as BrokerKind, Instrument};
     use rt_core::order::{Order, OrderStatus, OrderType, Side, TimeInForce};
@@ -588,6 +652,7 @@ async fn panic_close_leverage_positions(
         };
 
         let now = chrono::Utc::now();
+        let meta = instruments.lookup(&symbol);
         let order = Order {
             id: 0,
             signal_id: None,
@@ -598,8 +663,9 @@ async fn panic_close_leverage_positions(
                 symbol: symbol.clone(),
                 broker: BrokerKind::KrakenFutures,
                 asset_class: AssetClass::CryptoPerp,
-                min_order_size: Decimal::ONE,
-                tick_size: Decimal::new(5, 1),
+                // Drop 19 post-audit: aus Registry, nicht hartcodiert.
+                min_order_size: meta.min_order_size,
+                tick_size: meta.tick_size,
             },
             side,
             order_type: OrderType::Market,

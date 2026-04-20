@@ -16,6 +16,7 @@
 
 pub mod execution_mode;
 pub mod instrument;
+pub mod instrument_registry;
 pub mod market_data;
 pub mod order;
 pub mod portfolio;

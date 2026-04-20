@@ -1,0 +1,35 @@
+# razortrade Donchian exit timer — fires every 5 minutes
+#
+# Cadence rationale: Exits müssen schneller reagieren als Entries.
+# Entry-Timer feuert nur alle 4h am Candle-Close, aber Exits können
+# bei einem Gap-Move zwischen Candles nötig sein. 5 Minuten ist
+# pragmatischer Trade-off: häufig genug um Trends zeitnah zu
+# verlassen, selten genug um Kraken's Public-REST nicht zu spammen
+# (12 Calls/h).
+#
+# Der Check selbst ist günstig wenn es keine offene Position gibt
+# (1 SELECT gegen positions-Tabelle, dann exit).
+
+[Unit]
+Description=Run razortrade Donchian exit checker every 5 minutes
+Documentation=file:/usr/share/doc/razortrade/README.md
+Requires=razortrade-exits.service
+
+[Timer]
+# Alle 5 Minuten, beginnend 2 Minuten nach Boot (damit der daemon
+# Zeit hat die WS-Feeds zu initialisieren).
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+# Kleines Jitter gegen synchrones Feuern mit dem 4h-Entry-Timer.
+RandomizedDelaySec=30
+
+# Persistent=false ist hier richtig: wenn der Host eine Stunde weg
+# war, brauchen wir nicht 12 Backlog-Ticks nachzuholen — nur den
+# nächsten regulären.
+Persistent=false
+
+Unit=razortrade-exits.service
+
+[Install]
+WantedBy=timers.target

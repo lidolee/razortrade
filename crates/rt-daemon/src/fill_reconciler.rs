@@ -54,6 +54,7 @@ pub async fn run(
     mut shutdown_rx: watch::Receiver<bool>,
     risk_config: Arc<RiskConfig>,
     broker: Option<Arc<dyn Broker>>,
+    instruments: Arc<rt_core::instrument_registry::InstrumentRegistry>,
 ) {
     info!(
         interval_ms = tick_interval.as_millis() as u64,
@@ -72,6 +73,7 @@ pub async fn run(
                     &mut last_applied_seq,
                     &risk_config,
                     broker.as_ref(),
+                    &instruments,
                 ).await {
                     error!(error = %e, "fill reconciler tick failed");
                 }
@@ -92,6 +94,7 @@ async fn reconcile_once(
     last_applied_seq: &mut u64,
     risk_config: &Arc<RiskConfig>,
     broker: Option<&Arc<dyn Broker>>,
+    instruments: &Arc<rt_core::instrument_registry::InstrumentRegistry>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Pull new fills out under the read lock, then release before DB I/O.
     // The FillsRing clones cheaply; copying a handful of Decimal+String
@@ -233,7 +236,7 @@ async fn reconcile_once(
                         // und ETF haben keine hard-stop-Semantik.
                         if sleeve == "crypto_leverage" {
                             if let Err(e) = crate::evaluate_kill_switch_once(
-                                db, risk_config, broker,
+                                db, risk_config, broker, instruments,
                             ).await {
                                 error!(
                                     error = %e,
@@ -362,7 +365,7 @@ async fn reconcile_once(
                                 // auch im Orphan-Pfad.
                                 if sleeve == "crypto_leverage" {
                                     if let Err(e) = crate::evaluate_kill_switch_once(
-                                        db, risk_config, broker,
+                                        db, risk_config, broker, instruments,
                                     ).await {
                                         error!(
                                             error = %e,

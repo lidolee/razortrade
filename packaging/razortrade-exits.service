@@ -1,0 +1,53 @@
+# razortrade Donchian exit signal generator — oneshot
+#
+# Invoked by razortrade-exits.timer every 5 minutes. Runs as the
+# `razortrade` user. Reads open leverage positions from SQLite,
+# fetches current 4h candles, and writes a `trend_exit` signal
+# if the Turtle-Donchian-10-Bar-Exit condition is met.
+#
+# Same threat model as razortrade-signals: stdlib-only Python,
+# needs outbound HTTPS to futures.kraken.com and SQLite write.
+
+[Unit]
+Description=razortrade Donchian exit signal generator (Turtle trailing)
+Documentation=file:/usr/share/doc/razortrade/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=razortrade
+Group=razortrade
+
+ExecStart=/usr/bin/python3 /usr/libexec/razortrade/donchian_exit.py \
+    --resolution 4h \
+    --donchian-exit 10 \
+    --db /var/lib/razortrade/razortrade.sqlite \
+    --commit
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/razortrade
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+PrivateDevices=true
+CapabilityBoundingSet=
+
+Restart=on-failure
+RestartSec=30s
+StartLimitBurst=3
+StartLimitIntervalSec=600
+
+StandardOutput=journal
+StandardError=journal
