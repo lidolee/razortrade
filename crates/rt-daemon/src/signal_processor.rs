@@ -127,6 +127,37 @@ impl SignalProcessor {
             }
         };
 
+        // --- OF-2: expiry guard ----------------------------------------
+        // If a signal has an expires_at and we've blown past it (e.g.
+        // the daemon was down during the window), reject without any
+        // further work. This prevents stale breakouts from executing
+        // minutes or hours after the market context that generated
+        // them has changed.
+        if let Some(exp) = signal.expires_at {
+            let now = Utc::now();
+            if exp <= now {
+                warn!(
+                    signal_id = signal.id,
+                    expires_at = %exp,
+                    now = %now,
+                    "signal expired before processing; rejecting"
+                );
+                let reason = serde_json::json!({
+                    "kind": "signal_expired",
+                    "expires_at": exp.to_rfc3339(),
+                    "now": now.to_rfc3339(),
+                });
+                self.db
+                    .mark_signal_rejected(
+                        signal.id,
+                        &now.to_rfc3339(),
+                        &reason.to_string(),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        }
+
         // --- Build MarketSnapshot --------------------------------------
         let market = match self
             .market_data
@@ -334,6 +365,7 @@ impl SignalProcessor {
                 order.limit_price.map(|p| p.to_string()).as_deref(),
                 None,
                 &now_iso,
+                order.cli_ord_id.as_deref(),
             )
             .await?;
 
@@ -494,6 +526,13 @@ fn row_to_signal(row: &SignalRow) -> anyhow::Result<Signal> {
         .transpose()
         .map_err(|e| anyhow!("invalid processed_at: {e}"))?;
 
+    let expires_at = row
+        .expires_at
+        .as_deref()
+        .map(|s| chrono::DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc)))
+        .transpose()
+        .map_err(|e| anyhow!("invalid expires_at: {e}"))?;
+
     Ok(Signal {
         id: row.id,
         created_at,
@@ -507,6 +546,7 @@ fn row_to_signal(row: &SignalRow) -> anyhow::Result<Signal> {
         status,
         processed_at,
         rejection_reason: row.rejection_reason.clone(),
+        expires_at,
     })
 }
 
@@ -688,6 +728,12 @@ fn build_kraken_futures_order(
         signal_id: Some(signal.id),
         broker: BrokerKind::KrakenFutures,
         broker_order_id: None,
+        // CV-1: deterministic client order id. `rt-s{signal_id}` is
+        // stable across submit retries (broker dedupes on this key)
+        // and lets fill_reconciler attach orphan fills — fills whose
+        // broker_order_id was never persisted because the REST
+        // response was lost to a network timeout.
+        cli_ord_id: Some(format!("rt-s{}", signal.id)),
         instrument: Instrument {
             symbol: signal.instrument_symbol.clone(),
             broker: BrokerKind::KrakenFutures,
@@ -771,6 +817,7 @@ mod tests {
             status: SignalStatus::Pending,
             processed_at: None,
             rejection_reason: None,
+            expires_at: None,
         }
     }
 

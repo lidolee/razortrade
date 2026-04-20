@@ -154,6 +154,7 @@ mod tests {
             status: SignalStatus::Pending,
             processed_at: None,
             rejection_reason: None,
+            expires_at: None,
         };
         let book = OrderBookSnapshot {
             bids: bids.into_iter().map(|(p, q)| OrderBookLevel {

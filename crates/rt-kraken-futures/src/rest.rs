@@ -343,7 +343,12 @@ impl ExecutionBroker for KrakenFuturesRestClient {
             size: order.quantity,
             limit_price: order.limit_price,
             stop_price: order.stop_price,
-            cli_ord_id: None,
+            // CV-1: send cli_ord_id so a REST timeout on submit is
+            // recoverable. Kraken echoes this in fills and open-orders
+            // updates, letting fill_reconciler attach fills to this
+            // order even without the broker_order_id from the
+            // (potentially lost) HTTP response.
+            cli_ord_id: order.cli_ord_id.clone(),
             reduce_only: None,
             trigger_signal: None,
         };

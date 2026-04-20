@@ -224,11 +224,136 @@ async fn reconcile_once(
                 }
             }
             Ok(None) => {
-                warn!(
-                    broker_order_id = %fill.order_id,
-                    fill_id = %fill.fill_id,
-                    "fill received for unknown order (externally submitted?)"
-                );
+                // CV-1 orphan-catcher: the order row matching
+                // `broker_order_id` is unknown. Before we give up,
+                // check whether the fill carries a `cli_ord_id` we
+                // generated ourselves — this happens when our REST
+                // submit landed at Kraken but the HTTP response (with
+                // the broker_order_id) was lost to a network error.
+                // In that case we backfill the broker_order_id onto
+                // our pending order and re-apply the fill.
+                let backfilled = if let Some(cli) = fill.cli_ord_id.as_deref() {
+                    match db
+                        .find_order_id_by_cli_ord_id(BROKER_TAG, cli)
+                        .await
+                    {
+                        Ok(Some(order_id)) => {
+                            if let Err(e) = db
+                                .backfill_broker_order_id(
+                                    order_id,
+                                    &fill.order_id,
+                                    &now_iso,
+                                )
+                                .await
+                            {
+                                error!(
+                                    order_id,
+                                    cli_ord_id = %cli,
+                                    broker_order_id = %fill.order_id,
+                                    error = %e,
+                                    "orphan-catcher: backfill failed"
+                                );
+                                false
+                            } else {
+                                info!(
+                                    order_id,
+                                    cli_ord_id = %cli,
+                                    broker_order_id = %fill.order_id,
+                                    fill_id = %fill.fill_id,
+                                    "orphan-catcher: matched fill to pending order via cli_ord_id; broker_order_id backfilled"
+                                );
+                                true
+                            }
+                        }
+                        Ok(None) => false,
+                        Err(e) => {
+                            error!(
+                                cli_ord_id = %cli,
+                                error = %e,
+                                "orphan-catcher: cli_ord_id lookup failed"
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+
+                if backfilled {
+                    // Retry the apply now that the order row exists
+                    // with our broker_order_id set.
+                    match db
+                        .apply_fill_to_order(
+                            &fill.order_id,
+                            fill.qty,
+                            fill.price,
+                            fill.fee_paid,
+                            &now_iso,
+                        )
+                        .await
+                    {
+                        Ok(Some(outcome)) => {
+                            info!(
+                                order_id = outcome.order_id,
+                                broker_order_id = %fill.order_id,
+                                fill_id = %fill.fill_id,
+                                fill_qty = %fill.qty,
+                                fill_price = %fill.price,
+                                new_filled_quantity = %outcome.new_filled_quantity,
+                                new_status = %outcome.new_status,
+                                fully_filled = outcome.is_fully_filled,
+                                "fill applied to order (via orphan-catcher)"
+                            );
+                            // Position update path — kept in sync with
+                            // the happy-path branch above.
+                            if let Some(sleeve) = &outcome.sleeve {
+                                if let Err(e) = db
+                                    .apply_fill_to_position(
+                                        &outcome.instrument_symbol,
+                                        &outcome.broker,
+                                        sleeve,
+                                        outcome.is_buy,
+                                        fill.qty,
+                                        fill.price,
+                                        &now_iso,
+                                    )
+                                    .await
+                                {
+                                    error!(
+                                        broker_order_id = %fill.order_id,
+                                        fill_id = %fill.fill_id,
+                                        error = %e,
+                                        "orphan-catcher: position update failed after apply"
+                                    );
+                                    return Err(Box::new(e));
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            warn!(
+                                broker_order_id = %fill.order_id,
+                                fill_id = %fill.fill_id,
+                                "orphan-catcher: second lookup still None; abandoning"
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                broker_order_id = %fill.order_id,
+                                fill_id = %fill.fill_id,
+                                error = %e,
+                                "orphan-catcher: apply_fill_to_order failed"
+                            );
+                            return Err(Box::new(e));
+                        }
+                    }
+                } else {
+                    warn!(
+                        broker_order_id = %fill.order_id,
+                        fill_id = %fill.fill_id,
+                        cli_ord_id = ?fill.cli_ord_id,
+                        "fill received for unknown order (externally submitted?)"
+                    );
+                }
             }
             Err(e) => {
                 error!(

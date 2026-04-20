@@ -58,7 +58,7 @@ impl Database {
             r#"
             SELECT id, created_at, instrument_symbol, side, signal_type, sleeve,
                    notional_chf, leverage, metadata_json, status, processed_at,
-                   rejection_reason
+                   rejection_reason, expires_at
             FROM signals
             WHERE status = 'pending'
             ORDER BY created_at ASC
@@ -166,6 +166,45 @@ impl Database {
         Ok(row.is_some())
     }
 
+    /// LF-1: has a HARD-TRIGGER (panic-close) kill-switch event already
+    /// been recorded and is still unresolved? Used by the supervisor
+    /// to avoid re-issuing panic-close on every tick once the first
+    /// fires. Reason kinds starting with `hard_` are treated as hard.
+    pub async fn has_active_hard_trigger(&self) -> Result<bool> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT id FROM kill_switch_events
+             WHERE resolved_at IS NULL
+               AND reason_kind LIKE 'hard_%'
+             LIMIT 1
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    /// LF-1 panic-close support: list all open leverage positions
+    /// (quantity != 0, not yet closed). Used by the hard-trigger
+    /// handler to iterate positions that need market reduce-only
+    /// closure. Returns (instrument_symbol, broker, sleeve, quantity).
+    pub async fn list_open_leverage_positions(
+        &self,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            r#"
+            SELECT instrument_symbol, broker, sleeve, quantity
+              FROM positions
+             WHERE closed_at IS NULL
+               AND sleeve = 'crypto_leverage'
+               AND CAST(quantity AS REAL) != 0
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// Free-form audit log entry.
     pub async fn audit(
         &self,
@@ -251,6 +290,7 @@ impl Database {
         limit_price: Option<&str>,
         stop_price: Option<&str>,
         created_at_iso: &str,
+        cli_ord_id: Option<&str>,
     ) -> Result<i64> {
         let result = sqlx::query(
             r#"
@@ -258,8 +298,8 @@ impl Database {
                 (signal_id, broker, instrument_symbol, side,
                  order_type, time_in_force, quantity,
                  limit_price, stop_price, status,
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_submission', ?, ?)
+                 created_at, updated_at, cli_ord_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_submission', ?, ?, ?)
             "#,
         )
         .bind(signal_id)
@@ -273,9 +313,63 @@ impl Database {
         .bind(stop_price)
         .bind(created_at_iso)
         .bind(created_at_iso)
+        .bind(cli_ord_id)
         .execute(&self.pool)
         .await?;
         Ok(result.last_insert_rowid())
+    }
+
+    /// Find an order by its `cli_ord_id`. Used by the orphan-catcher in
+    /// fill_reconciler when a fill arrives for a broker_order_id we
+    /// don't know but whose cli_ord_id matches a pending local order
+    /// (the REST response was lost but the order did reach Kraken).
+    pub async fn find_order_id_by_cli_ord_id(
+        &self,
+        broker: &str,
+        cli_ord_id: &str,
+    ) -> Result<Option<i64>> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT id FROM orders
+             WHERE broker = ? AND cli_ord_id = ?
+             LIMIT 1
+            "#,
+        )
+        .bind(broker)
+        .bind(cli_ord_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(id,)| id))
+    }
+
+    /// Backfill `broker_order_id` on an order that the daemon already
+    /// knows (by cli_ord_id) but never persisted the broker id for —
+    /// because the REST submit response was lost to a network error.
+    /// The WS fill feed delivers the broker_order_id, closing the gap.
+    pub async fn backfill_broker_order_id(
+        &self,
+        order_id: i64,
+        broker_order_id: &str,
+        updated_at_iso: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE orders
+               SET broker_order_id = ?,
+                   status = CASE
+                       WHEN status = 'pending_submission'
+                       THEN 'acknowledged' ELSE status END,
+                   updated_at = ?
+             WHERE id = ?
+               AND broker_order_id IS NULL
+            "#,
+        )
+        .bind(broker_order_id)
+        .bind(updated_at_iso)
+        .bind(order_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Update an order after the broker accepted it. Sets broker_order_id
@@ -851,9 +945,7 @@ impl Database {
         let mut total = Decimal::ZERO;
         for (raw,) in rows {
             let v = Decimal::from_str(&raw).map_err(|e| {
-                crate::PersistenceError::Decimal(
-                    format!("parsing realized_pnl_btc {:?}: {}", raw, e)
-                )
+                crate::PersistenceError::Decimal(format!("parsing realized_pnl_btc {:?}: {}", raw, e))
             })?;
             total += v;
         }
@@ -1505,6 +1597,7 @@ mod tests {
                 Some("50000"),
                 None,
                 &t,
+                None,
             )
             .await
             .expect("insert order");

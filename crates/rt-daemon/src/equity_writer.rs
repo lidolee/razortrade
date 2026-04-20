@@ -183,6 +183,27 @@ async fn write_one_snapshot(
 
     // ---- 7. Total + NAV (simplified for MVP) --------------------
     let total_equity_chf = cash_chf + leverage_value_chf;
+
+    // LF-3: skip zero-equity writes. A snapshot of 0 CHF is never a
+    // real state in Paper/Live — it only happens on transient failures
+    // (e.g. accounts API returned empty, ticker last was present but
+    // accounts balances were still cold). Writing 0 corrupts the
+    // equity curve on the dashboard with an artificial cliff.
+    if total_equity_chf <= Decimal::ZERO {
+        warn!(
+            total_equity_chf = %total_equity_chf,
+            cash_chf = %cash_chf,
+            leverage_value_chf = %leverage_value_chf,
+            flex_balance_usd = %flex_balance_usd,
+            sc_pv_btc = %sc_pv_btc,
+            "equity snapshot would be zero or negative; skipping insert"
+        );
+        return Err(anyhow!(
+            "computed total_equity_chf = {} is not positive; refusing to persist",
+            total_equity_chf
+        ));
+    }
+
     // For a single-operator MVP there is exactly 1 unit of ownership
     // and NAV == 1 forever. Drawdown therefore 0. A multi-party fund
     // would track capital_flows and compute these properly.

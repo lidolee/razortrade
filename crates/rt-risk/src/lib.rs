@@ -74,6 +74,19 @@ pub struct RiskConfig {
     /// leverage sleeve is force-disabled. Default: 0.20 (20%).
     pub max_portfolio_drawdown: Decimal,
 
+    /// LF-1 hard kill-switch threshold, in CHF. Triggers a **hard**
+    /// stop (panic-close all open leverage positions) when realised
+    /// plus unrealised P&L on the leverage sleeve falls to or below
+    /// this value. Must be strictly lower than
+    /// `leverage_kill_switch_budget_chf` so the soft (block-new-trades)
+    /// trigger fires first and the hard trigger only activates when
+    /// the market keeps moving against us. Default: -1200 CHF.
+    ///
+    /// `#[serde(default)]` ensures configs predating this field load
+    /// with the default rather than failing to parse.
+    #[serde(default = "default_kill_switch_effective_threshold_chf")]
+    pub kill_switch_effective_threshold_chf: Decimal,
+
     /// Check 4: Assumed instantaneous adverse move used to simulate
     /// worst-case loss for Check 4. Default: 0.10 (10%).
     pub adverse_move_for_worst_case: Decimal,
@@ -123,6 +136,14 @@ fn default_usd_per_chf_fallback() -> Decimal {
     Decimal::new(110, 2)
 }
 
+fn default_kill_switch_effective_threshold_chf() -> Decimal {
+    // -1200 CHF — 200 CHF below the -1000 realised budget, so the
+    // soft (block-new-trades) trigger always fires first and the hard
+    // (panic-close) trigger only catches a runaway mark-to-market
+    // drop after realised losses already breached budget.
+    Decimal::from(-1200)
+}
+
 impl Default for RiskConfig {
     fn default() -> Self {
         Self {
@@ -143,6 +164,8 @@ impl Default for RiskConfig {
             max_leverage: Decimal::from(2),
             max_notional_chf_per_order: default_max_notional_chf_per_order(),
             usd_per_chf_fallback: default_usd_per_chf_fallback(),
+            kill_switch_effective_threshold_chf:
+                default_kill_switch_effective_threshold_chf(),
         }
     }
 }

@@ -40,7 +40,7 @@ mod tests {
     use crate::RiskConfig;
     use chrono::{Duration, Utc};
     use rt_core::{
-        instrument::Sleeve,
+        instrument::{Broker, Sleeve},
         market_data::{MarketSnapshot, OrderBookLevel, OrderBookSnapshot},
         order::Side,
         portfolio::{PortfolioState, SleeveState},
@@ -65,6 +65,7 @@ mod tests {
             status: SignalStatus::Pending,
             processed_at: None,
             rejection_reason: None,
+            expires_at: None,
         };
 
         let market = MarketSnapshot {

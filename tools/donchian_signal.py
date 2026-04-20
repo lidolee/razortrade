@@ -51,7 +51,7 @@ import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import List, Sequence
 
@@ -236,10 +236,15 @@ def write_signal(
         "breakout_lower": str(signal.lower),
         "close_at_signal": str(signal.close),
     }
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    # OF-2: signals must expire so a stale breakout is not re-tried
+    # forever by the signal_processor retry loop. 30 minutes covers
+    # several checklist retry cycles without letting a signal outlive
+    # the market context that generated it.
+    expires_at_utc = now_utc + timedelta(minutes=30)
+
     row = {
-        "created_at": datetime.now(timezone.utc)
-        .replace(microsecond=0)
-        .isoformat(),
+        "created_at": now_utc.isoformat(),
         "instrument_symbol": symbol,
         "side": signal.side,
         "signal_type": SIGNAL_TYPE_TREND_ENTRY,
@@ -248,17 +253,25 @@ def write_signal(
         "leverage": str(leverage),
         "metadata_json": json.dumps(metadata),
         "status": "pending",
+        "expires_at": expires_at_utc.isoformat(),
     }
-    conn = sqlite3.connect(db_path)
+    # CV-3: SQLITE_BUSY on a concurrent writer is otherwise unhandled
+    # and kills this script, losing the signal until the next 4h tick.
+    # The Rust daemon holds short write locks (< 100ms typical); 30s
+    # of patience absorbs any realistic burst including a fill-snapshot
+    # replay on reconnect. `busy_timeout` is also set inside the
+    # connection for belt-and-braces against driver differences.
+    conn = sqlite3.connect(db_path, timeout=30.0)
     try:
+        conn.execute("PRAGMA busy_timeout = 30000")
         cur = conn.execute(
             """
             INSERT INTO signals
               (created_at, instrument_symbol, side, signal_type, sleeve,
-               notional_chf, leverage, metadata_json, status)
+               notional_chf, leverage, metadata_json, status, expires_at)
             VALUES
               (:created_at, :instrument_symbol, :side, :signal_type, :sleeve,
-               :notional_chf, :leverage, :metadata_json, :status)
+               :notional_chf, :leverage, :metadata_json, :status, :expires_at)
             """,
             row,
         )

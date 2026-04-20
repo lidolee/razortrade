@@ -136,6 +136,7 @@ mod tests {
             status: SignalStatus::Pending,
             processed_at: None,
             rejection_reason: None,
+            expires_at: None,
         };
         let market = MarketSnapshot {
             instrument_symbol: "PI_XBTUSD".to_string(),

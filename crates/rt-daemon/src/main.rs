@@ -262,7 +262,7 @@ async fn main() -> Result<()> {
         risk_config.clone(),
         market_data.clone(),
         execution_mode,
-        crypto_leverage_broker,
+        crypto_leverage_broker.clone(),
     ));
 
     // ---- Shutdown plumbing --------------------------------------------
@@ -291,7 +291,13 @@ async fn main() -> Result<()> {
         let cfg = risk_config.clone();
         let rx = shutdown_rx.clone();
         let interval = Duration::from_secs(config.kill_switch_check_interval_secs);
-        tokio::spawn(async move { run_kill_switch_supervisor(db, cfg, interval, rx).await })
+        // LF-1: supervisor needs broker access to execute panic-close.
+        // In DryRun mode no broker is present; panic-close becomes a
+        // log-only warning — we still record the event for audit.
+        let broker = crypto_leverage_broker.clone();
+        tokio::spawn(async move {
+            run_kill_switch_supervisor(db, cfg, broker, interval, rx).await
+        })
     };
 
     let fill_reconciler_handle = {
@@ -338,11 +344,13 @@ async fn main() -> Result<()> {
 async fn run_kill_switch_supervisor(
     db: Arc<Database>,
     config: Arc<RiskConfig>,
+    broker: Option<Arc<dyn Broker>>,
     interval: Duration,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     info!(
         interval_secs = interval.as_secs(),
+        broker_available = broker.is_some(),
         "kill-switch supervisor started (evaluator active)"
     );
 
@@ -352,7 +360,7 @@ async fn run_kill_switch_supervisor(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                if let Err(e) = evaluate_kill_switch_once(&db, &config).await {
+                if let Err(e) = evaluate_kill_switch_once(&db, &config, broker.as_ref()).await {
                     error!(error = %e, "kill-switch evaluation iteration failed");
                 }
             }
@@ -373,22 +381,18 @@ async fn run_kill_switch_supervisor(
 async fn evaluate_kill_switch_once(
     db: &Arc<Database>,
     config: &Arc<RiskConfig>,
+    broker: Option<&Arc<dyn Broker>>,
 ) -> anyhow::Result<()> {
     use rt_risk::{KillSwitchDecision, KillSwitchEvaluator, KillSwitchReason};
 
     let now = chrono::Utc::now();
     let portfolio = crate::portfolio_loader::load_portfolio_state(db, now).await?;
 
-    // If the flag is already set in the database, the evaluator correctly
-    // returns NoChange. We still log the current state for observability.
-    if portfolio.kill_switch_active {
-        tracing::debug!(
-            nav = %portfolio.nav_per_unit,
-            realised_leverage = %portfolio.leverage_sleeve_realized_pnl(),
-            "kill-switch already active; no re-evaluation"
-        );
-        return Ok(());
-    }
+    // LF-1: the evaluator must be called even when soft-disabled so
+    // that a runaway mark-to-market loss on still-open positions can
+    // escalate to a hard panic-close. However we do not re-fire
+    // panic-close if one is already unresolved.
+    let hard_already = db.has_active_hard_trigger().await?;
 
     let decision = KillSwitchEvaluator::evaluate(&portfolio, config.as_ref(), now);
 
@@ -398,6 +402,7 @@ async fn evaluate_kill_switch_once(
                 nav = %portfolio.nav_per_unit,
                 drawdown = %portfolio.drawdown_fraction(),
                 realised_leverage = %portfolio.leverage_sleeve_realized_pnl(),
+                effective_leverage = %portfolio.leverage_sleeve_effective_pnl(),
                 "kill-switch state nominal"
             );
         }
@@ -408,6 +413,12 @@ async fn evaluate_kill_switch_once(
                 KillSwitchReason::LifetimeRealisedLossBudgetExhausted { .. } => {
                     "lifetime_realised_loss_budget"
                 }
+                KillSwitchReason::EffectivePnlBudgetExhausted { .. } => {
+                    // Not reachable via Disable; the evaluator routes
+                    // effective-breach through PanicClose. Logged for
+                    // completeness in case of future refactor.
+                    "effective_pnl_budget"
+                }
                 KillSwitchReason::PortfolioDrawdown { .. } => "portfolio_drawdown",
                 KillSwitchReason::ManualTrigger { .. } => "manual_trigger",
             };
@@ -415,7 +426,7 @@ async fn evaluate_kill_switch_once(
             error!(
                 reason_kind,
                 summary = %reason.summary(),
-                "KILL-SWITCH TRIGGERED — leveraged trading will be refused \
+                "KILL-SWITCH TRIGGERED (soft) — leveraged trading will be refused \
                  by pre-trade checklist until manually resolved"
             );
 
@@ -432,6 +443,175 @@ async fn evaluate_kill_switch_once(
                 .await?;
 
             info!(event_id, "kill-switch event persisted");
+        }
+        KillSwitchDecision::PanicClose { reason, at } => {
+            if hard_already {
+                tracing::debug!(
+                    summary = %reason.summary(),
+                    "hard kill-switch already active; skipping duplicate panic-close"
+                );
+                return Ok(());
+            }
+
+            // Use `hard_` prefix on reason_kind so has_active_hard_trigger
+            // can filter cheaply via SQL LIKE.
+            let reason_kind = "hard_effective_pnl_budget";
+
+            error!(
+                reason_kind,
+                summary = %reason.summary(),
+                "KILL-SWITCH TRIGGERED (HARD) — initiating panic-close of all open \
+                 leverage positions"
+            );
+
+            // Record the event FIRST. If the broker calls fail below
+            // we still have an audit trail and has_active_hard_trigger
+            // will block re-entry on the next tick.
+            let reason_json = serde_json::to_string(&reason)?;
+            let snapshot_json = serde_json::to_string(&portfolio)?;
+            let event_id = db
+                .record_kill_switch(
+                    &at.to_rfc3339(),
+                    reason_kind,
+                    &reason_json,
+                    &snapshot_json,
+                )
+                .await?;
+
+            info!(event_id, "hard kill-switch event persisted");
+
+            // Execute the panic-close routine. In DryRun there is no
+            // broker — we stop here with a loud warning.
+            let broker = match broker {
+                Some(b) => b,
+                None => {
+                    error!(
+                        event_id,
+                        "panic-close requested but no broker is configured (DryRun mode); \
+                         hard kill-switch is recorded but no orders will be sent"
+                    );
+                    return Ok(());
+                }
+            };
+
+            if let Err(e) = panic_close_leverage_positions(db, broker, event_id).await {
+                error!(
+                    event_id,
+                    error = %e,
+                    "panic-close routine failed; hard kill-switch remains active"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// LF-1 panic-close routine. Iterates every open leverage position and
+/// submits a market, reduce-only order on the opposite side to flatten
+/// it. We submit all orders in parallel (best-effort) rather than
+/// sequentially: if one call fails, the others still have a chance
+/// to close their position. Each submission is logged for audit.
+///
+/// No retry loop here — if an order fails, it is logged and the next
+/// supervisor tick will NOT retry (has_active_hard_trigger gates the
+/// whole path). The operator is expected to intervene.
+async fn panic_close_leverage_positions(
+    db: &Arc<Database>,
+    broker: &Arc<dyn Broker>,
+    event_id: i64,
+) -> anyhow::Result<()> {
+    use rt_core::instrument::{AssetClass, Broker as BrokerKind, Instrument};
+    use rt_core::order::{Order, OrderStatus, OrderType, Side, TimeInForce};
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
+    let positions = db.list_open_leverage_positions().await?;
+    info!(
+        event_id,
+        count = positions.len(),
+        "panic-close: enumerating open leverage positions"
+    );
+
+    for (symbol, broker_name, sleeve, qty_str) in positions {
+        // Quantity is stored as a TEXT Decimal. Positive = long, negative
+        // = short. The close side is the opposite sign.
+        let qty = match Decimal::from_str(&qty_str) {
+            Ok(q) => q,
+            Err(e) => {
+                error!(
+                    %symbol,
+                    qty_str = %qty_str,
+                    error = %e,
+                    "panic-close: could not parse position quantity; skipping"
+                );
+                continue;
+            }
+        };
+
+        let (side, size) = if qty.is_sign_positive() {
+            (Side::Sell, qty)
+        } else {
+            (Side::Buy, qty.abs())
+        };
+
+        let now = chrono::Utc::now();
+        let order = Order {
+            id: 0,
+            signal_id: None,
+            broker: BrokerKind::KrakenFutures,
+            broker_order_id: None,
+            cli_ord_id: Some(format!("rt-panic-{}-{}", event_id, now.timestamp())),
+            instrument: Instrument {
+                symbol: symbol.clone(),
+                broker: BrokerKind::KrakenFutures,
+                asset_class: AssetClass::CryptoPerp,
+                min_order_size: Decimal::ONE,
+                tick_size: Decimal::new(5, 1),
+            },
+            side,
+            order_type: OrderType::Market,
+            time_in_force: TimeInForce::Ioc,
+            quantity: size,
+            limit_price: None,
+            stop_price: None,
+            status: OrderStatus::PendingSubmission,
+            filled_quantity: Decimal::ZERO,
+            avg_fill_price: None,
+            fees_paid: Decimal::ZERO,
+            created_at: now,
+            updated_at: now,
+            error_message: None,
+        };
+
+        error!(
+            event_id,
+            %symbol,
+            %broker_name,
+            %sleeve,
+            side = ?side,
+            size = %size,
+            "panic-close: submitting market reduce order"
+        );
+
+        match broker.submit_order(&order).await {
+            Ok(res) => {
+                info!(
+                    event_id,
+                    %symbol,
+                    broker_order_id = %res.broker_order_id,
+                    status = ?res.status,
+                    "panic-close: order submitted"
+                );
+            }
+            Err(e) => {
+                error!(
+                    event_id,
+                    %symbol,
+                    error = %e,
+                    "panic-close: order submission failed"
+                );
+            }
         }
     }
 

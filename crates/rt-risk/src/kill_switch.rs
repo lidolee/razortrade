@@ -40,19 +40,36 @@ use serde::{Deserialize, Serialize};
 pub enum KillSwitchDecision {
     /// No change needed.
     NoChange,
-    /// Leverage sleeve must be disabled. The daemon will persist this
-    /// decision and refuse new leveraged trades until manually reset.
+    /// Leverage sleeve must be disabled (soft stop). The daemon persists
+    /// this decision and refuses new leveraged trades until manually
+    /// reset; existing positions are **left open** to close on their
+    /// own risk-management (TP/SL) or operator action.
     Disable { reason: KillSwitchReason, at: DateTime<Utc> },
+    /// LF-1 hard stop: effective (realised + unrealised) P&L on the
+    /// leverage sleeve has dropped past the hard threshold. The daemon
+    /// must immediately issue market reduce-only orders for every
+    /// open leverage position, then persist the disable flag as
+    /// `hard_triggered`. Recovery requires manual operator action.
+    PanicClose { reason: KillSwitchReason, at: DateTime<Utc> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum KillSwitchReason {
     /// Realised lifetime loss on the CryptoLeverage sleeve is at or below
-    /// the configured budget. This is a **permanent stop**.
+    /// the configured budget. This is a **permanent soft stop** (new
+    /// trades blocked; open positions untouched).
     LifetimeRealisedLossBudgetExhausted {
         realized_pnl_chf: Decimal,
         budget_chf: Decimal,
+    },
+    /// LF-1 hard trigger: realised + adverse-unrealised P&L breached
+    /// the hard threshold. Triggers panic-close of all open leverage
+    /// positions. Catches the case where price gaps past the stop
+    /// faster than our reconciler or the Kraken liquidation engine.
+    EffectivePnlBudgetExhausted {
+        effective_pnl_chf: Decimal,
+        threshold_chf: Decimal,
     },
     /// NAV-per-unit drawdown exceeded the configured threshold.
     /// Mark-to-market driven; resets when NAV recovers (but the flag
@@ -71,6 +88,8 @@ impl KillSwitchReason {
         match self {
             Self::LifetimeRealisedLossBudgetExhausted { realized_pnl_chf, budget_chf } =>
                 format!("realised lifetime loss {realized_pnl_chf} CHF reached budget {budget_chf} CHF"),
+            Self::EffectivePnlBudgetExhausted { effective_pnl_chf, threshold_chf } =>
+                format!("effective P&L {effective_pnl_chf} CHF breached hard threshold {threshold_chf} CHF"),
             Self::PortfolioDrawdown { drawdown_fraction, limit_fraction } =>
                 format!("NAV drawdown {drawdown_fraction} exceeded limit {limit_fraction}"),
             Self::ManualTrigger { operator } =>
@@ -87,12 +106,31 @@ impl KillSwitchEvaluator {
         config: &RiskConfig,
         now: DateTime<Utc>,
     ) -> KillSwitchDecision {
-        // If it's already active, don't emit another Disable.
+        // Hard trigger is evaluated UNCONDITIONALLY — even if the
+        // sleeve is already soft-disabled. A soft-disabled sleeve
+        // still holds positions that can run further underwater; the
+        // supervisor must still be able to decide "panic-close now".
+        //
+        // The caller is expected to track whether a PanicClose has
+        // already been issued and not re-issue it. We deliberately do
+        // not gate on `kill_switch_active` for this decision.
+        let effective = portfolio.leverage_sleeve_effective_pnl();
+        if effective <= config.kill_switch_effective_threshold_chf {
+            return KillSwitchDecision::PanicClose {
+                reason: KillSwitchReason::EffectivePnlBudgetExhausted {
+                    effective_pnl_chf: effective,
+                    threshold_chf: config.kill_switch_effective_threshold_chf,
+                },
+                at: now,
+            };
+        }
+
+        // If soft-disabled, no further Disable emissions needed.
         if portfolio.kill_switch_active {
             return KillSwitchDecision::NoChange;
         }
 
-        // Guard 1: lifetime *realized* loss budget.
+        // Guard 1: lifetime *realized* loss budget (soft stop).
         // See module docs for why we use realized-only here.
         let realized = portfolio.leverage_sleeve_realized_pnl();
         if realized <= config.leverage_kill_switch_budget_chf {
@@ -172,17 +210,48 @@ mod tests {
         ));
     }
 
-    /// Important: unrealised loss alone must NOT trigger the permanent stop.
-    /// This is the counterpart to the hard_limit.rs change: the pre-trade
-    /// check rejects new trades when effective P&L breaches budget, but
-    /// the supervisor only permanently disables on realised losses.
+    /// Mild unrealised loss alone does NOT trigger either the soft
+    /// Disable or the hard PanicClose. The soft guard only fires on
+    /// realised P&L (-1000 default); the hard guard fires on
+    /// realised + unrealised <= -1200. At -500 unrealised we are
+    /// below neither.
     #[test]
-    fn does_not_disable_on_unrealised_alone() {
-        let p = portfolio(Decimal::ZERO, Decimal::from(-1500), Decimal::from(1), Decimal::from(1), false);
+    fn does_not_disable_on_mild_unrealised_alone() {
+        let p = portfolio(Decimal::ZERO, Decimal::from(-500), Decimal::from(1), Decimal::from(1), false);
         assert_eq!(
             KillSwitchEvaluator::evaluate(&p, &RiskConfig::default(), Utc::now()),
             KillSwitchDecision::NoChange
         );
+    }
+
+    /// LF-1: a runaway unrealised loss past the hard threshold must
+    /// trigger PanicClose even with zero realised losses. This
+    /// catches the scenario where the market gaps through the stop
+    /// faster than the reconciler can act.
+    #[test]
+    fn panic_closes_on_unrealised_past_hard_threshold() {
+        let p = portfolio(Decimal::ZERO, Decimal::from(-1500), Decimal::from(1), Decimal::from(1), false);
+        let decision = KillSwitchEvaluator::evaluate(&p, &RiskConfig::default(), Utc::now());
+        assert!(matches!(
+            decision,
+            KillSwitchDecision::PanicClose {
+                reason: KillSwitchReason::EffectivePnlBudgetExhausted { .. },
+                ..
+            }
+        ));
+    }
+
+    /// LF-1: the hard trigger fires even when the soft trigger is
+    /// already active. A soft-disabled sleeve still holds losing
+    /// positions that can run further underwater.
+    #[test]
+    fn panic_closes_even_when_already_soft_disabled() {
+        let p = portfolio(Decimal::from(-1000), Decimal::from(-300), Decimal::from(1), Decimal::from(1), true);
+        let decision = KillSwitchEvaluator::evaluate(&p, &RiskConfig::default(), Utc::now());
+        assert!(matches!(
+            decision,
+            KillSwitchDecision::PanicClose { .. }
+        ));
     }
 
     #[test]

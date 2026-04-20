@@ -97,6 +97,13 @@ pub struct Order {
     pub broker: Broker,
     /// Set once the broker acknowledges the order.
     pub broker_order_id: Option<String>,
+    /// Client-generated order id sent to the broker as `cliOrdId`.
+    /// Kraken Futures echoes this back in fills and open-orders updates,
+    /// letting the reconciler match fills even when the REST response
+    /// carrying `broker_order_id` was lost to a network timeout.
+    /// Format: `rt-s<signal_id>` — unique per signal, stable across
+    /// submit retries so the broker can deduplicate.
+    pub cli_ord_id: Option<String>,
     pub instrument: Instrument,
     pub side: Side,
     pub order_type: OrderType,

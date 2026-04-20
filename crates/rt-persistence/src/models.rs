@@ -20,6 +20,9 @@ pub struct SignalRow {
     pub status: String,
     pub processed_at: Option<String>,
     pub rejection_reason: Option<String>,
+    /// OF-2: optional hard expiry (ISO-8601 UTC).
+    #[sqlx(default)]
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -42,6 +45,9 @@ pub struct OrderRow {
     pub created_at: String,
     pub updated_at: String,
     pub error_message: Option<String>,
+    /// CV-1: client-generated order id, format `rt-s<signal_id>`.
+    #[sqlx(default)]
+    pub cli_ord_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

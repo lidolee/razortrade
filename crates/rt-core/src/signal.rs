@@ -63,4 +63,9 @@ pub struct Signal {
     pub status: SignalStatus,
     pub processed_at: Option<DateTime<Utc>>,
     pub rejection_reason: Option<String>,
+    /// OF-2: optional hard expiry. Signals past this instant are
+    /// rejected by the processor without further evaluation. None
+    /// means no expiry (legacy behaviour).
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
 }

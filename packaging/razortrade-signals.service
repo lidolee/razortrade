@@ -63,9 +63,16 @@ PrivateDevices=true
 CapabilityBoundingSet=
 
 # --- Failure handling --------------------------------------------------
-# A failed run is logged via journal. The timer will fire again at the
-# next scheduled slot regardless — there is no auto-retry in between,
-# on purpose, to avoid hammering Kraken when they are degraded.
+# A failed run is logged via journal. Transient failures (SQLITE_BUSY,
+# Kraken REST timeout, DNS hiccup) get up to 3 retries at 60s spacing
+# inside the same timer window; after that the timer waits for the
+# next scheduled slot. StartLimitBurst/IntervalSec prevent a
+# permanently broken daemon from hammering Kraken in a retry loop.
+
+Restart=on-failure
+RestartSec=60s
+StartLimitBurst=3
+StartLimitIntervalSec=600
 
 StandardOutput=journal
 StandardError=journal

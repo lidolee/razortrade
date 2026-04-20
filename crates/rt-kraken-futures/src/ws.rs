@@ -358,7 +358,29 @@ impl KrakenFuturesWsClient {
     /// Returns an optional [`HandlerAction`] that the outer loop must act on
     /// (e.g. sending the private subscribe after the challenge arrives).
     async fn handle_text(&self, text: &str) -> KrakenResult<Option<HandlerAction>> {
-        let msg: WsInboundMessage = serde_json::from_str(text)?;
+        // CV-7: deserialisation failures are silent data loss. When
+        // Kraken sends a message that does not match any WsInboundMessage
+        // variant, log the raw JSON at warn level and drop it. The
+        // caller treats the returned error as non-fatal; without the
+        // raw payload logged we have no way to diagnose which new
+        // field or feed introduced the drift.
+        //
+        // The raw text is truncated to 2 KiB to keep journal lines
+        // bounded on pathological payloads (order books can be huge);
+        // 2 KiB is far more than any event or fill message.
+        let msg: WsInboundMessage = match serde_json::from_str(text) {
+            Ok(m) => m,
+            Err(e) => {
+                let truncated: String = text.chars().take(2048).collect();
+                warn!(
+                    error = %e,
+                    raw = %truncated,
+                    raw_len = text.len(),
+                    "WS message did not match any known variant; dropping"
+                );
+                return Err(e.into());
+            }
+        };
 
         match msg {
             WsInboundMessage::Event(event) => self.handle_event(event),
