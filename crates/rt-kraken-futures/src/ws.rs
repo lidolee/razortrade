@@ -46,6 +46,7 @@ use crate::private_state::{FillsRing, FillsStore, OpenOrdersState, OpenOrdersSto
 use crate::{Credentials, KrakenError, KrakenResult};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{watch, RwLock};
@@ -98,7 +99,18 @@ pub struct KrakenFuturesWsClient {
     tickers: TickerStore,
     open_orders: OpenOrdersStore,
     fills: FillsStore,
+    /// Drop 19 CV-7: sampled raw-WS-Log für Fixture-Sammlung.
+    /// Wird von `handle_text` atomar inkrementiert; jede
+    /// `RAW_SAMPLE_PERIOD`-te Message landet mit ihrem Raw-JSON
+    /// im Journal. Bei `RAW_SAMPLE_PERIOD = 500` und ca. 10 msg/s
+    /// ergibt das etwa 1 Sample alle 50s — günstig fürs Journal,
+    /// trotzdem genug Material über 24h um eine Fixture-Bibliothek
+    /// aufzubauen ohne ins Rauschen des echten Traffics abzutauchen.
+    text_counter: Arc<AtomicU64>,
 }
+
+/// Drop 19 CV-7: sample every Nth successfully parsed WS message.
+const RAW_SAMPLE_PERIOD: u64 = 500;
 
 impl KrakenFuturesWsClient {
     pub fn new(config: WsConfig, credentials: Option<Credentials>) -> Self {
@@ -121,6 +133,7 @@ impl KrakenFuturesWsClient {
             tickers,
             open_orders,
             fills,
+            text_counter: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -358,6 +371,22 @@ impl KrakenFuturesWsClient {
     /// Returns an optional [`HandlerAction`] that the outer loop must act on
     /// (e.g. sending the private subscribe after the challenge arrives).
     async fn handle_text(&self, text: &str) -> KrakenResult<Option<HandlerAction>> {
+        // Drop 19 CV-7: sampled raw trace — jede RAW_SAMPLE_PERIOD-te
+        // Message wird mit ihrem Raw-JSON geloggt, damit wir über 24h
+        // eine authentische Fixture-Bibliothek für Parser-Tests
+        // aufbauen können. Die existierende Error-Path-Logging-Logik
+        // (weiter unten) bleibt zusätzlich aktiv.
+        let n = self.text_counter.fetch_add(1, Ordering::Relaxed);
+        if n % RAW_SAMPLE_PERIOD == 0 {
+            let truncated: String = text.chars().take(2048).collect();
+            info!(
+                raw_sample_n = n,
+                raw = %truncated,
+                raw_len = text.len(),
+                "CV-7 raw-ws sample (1 in 500)"
+            );
+        }
+
         // CV-7: deserialisation failures are silent data loss. When
         // Kraken sends a message that does not match any WsInboundMessage
         // variant, log the raw JSON at warn level and drop it. The
