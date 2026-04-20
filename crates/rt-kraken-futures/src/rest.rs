@@ -349,7 +349,11 @@ impl ExecutionBroker for KrakenFuturesRestClient {
             // order even without the broker_order_id from the
             // (potentially lost) HTTP response.
             cli_ord_id: order.cli_ord_id.clone(),
-            reduce_only: None,
+            // Drop 19 Part B — G3: reduce_only aus der Order-Struct
+            // durchreichen. True bei Panic-Close via
+            // panic_close_leverage_positions, sonst None (reguläre
+            // Entries). Kraken-API-Feld `reduceOnly`.
+            reduce_only: order.reduce_only,
             trigger_signal: None,
         };
         let resp = self

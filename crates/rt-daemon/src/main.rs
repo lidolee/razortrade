@@ -308,7 +308,15 @@ async fn main() -> Result<()> {
         // strategy are rare, and the cost of an empty tick is a single
         // read-lock acquisition on FillsStore.
         let tick = Duration::from_millis(1000);
-        tokio::spawn(async move { fill_reconciler::run(db, fills, tick, rx).await })
+        // Drop 19 Part B — G2: reconciler bekommt risk_config + broker
+        // damit er nach jedem Leverage-Fill sofort evaluate_kill_switch_once
+        // aufrufen kann (Flash-Crash-Schutz, sonst bis zu 60s Verzug).
+        let cfg = risk_config.clone();
+        let broker_for_reconciler: Option<Arc<dyn Broker>> =
+            kraken_concrete.clone().map(|c| c as Arc<dyn Broker>);
+        tokio::spawn(async move {
+            fill_reconciler::run(db, fills, tick, rx, cfg, broker_for_reconciler).await
+        })
     };
 
     // Drop 12: periodic equity snapshot writer. Only runs when we
@@ -378,7 +386,12 @@ async fn run_kill_switch_supervisor(
 ///
 /// Kept as a free function so it is trivially unit-testable with an
 /// in-memory SQLite database if we want to later.
-async fn evaluate_kill_switch_once(
+/// Drop 19 Part B — G2/G3: Kill-Switch-Auswertung, die bei Bedarf
+/// sofort Panic-Close ausführt. Wird sowohl vom 60s-Supervisor als
+/// auch vom Fill-Reconciler (nach jedem applied fill im Leverage-
+/// Sleeve) aufgerufen, damit Flash-Crash-Losses nicht bis zu 60s
+/// warten müssen.
+pub(crate) async fn evaluate_kill_switch_once(
     db: &Arc<Database>,
     config: &Arc<RiskConfig>,
     broker: Option<&Arc<dyn Broker>>,
@@ -582,6 +595,17 @@ async fn panic_close_leverage_positions(
             created_at: now,
             updated_at: now,
             error_message: None,
+            // Drop 19 Part B — G3: reduce_only=true verhindert, dass ein
+            // Panic-Close-Market-Order das Konto versehentlich in die
+            // Gegenrichtung (Short) positioniert. Szenarien die ohne
+            // dieses Flag kaputt gehen:
+            //   * Doppel-Trigger (Supervisor + Event-Trigger feuern
+            //     beide in derselben Sekunde vor Status-Update)
+            //   * Ein Fill ist schon teilweise durch, Position bereits
+            //     kleiner als berechnete `size`
+            // Kraken lehnt reduceOnly-Orders ab, wenn sie über die
+            // Position hinausgehen würden — exakt was wir wollen.
+            reduce_only: Some(true),
         };
 
         error!(

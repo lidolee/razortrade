@@ -30,8 +30,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use rt_execution::Broker;
 use rt_kraken_futures::private_state::FillsStore;
 use rt_persistence::Database;
+use rt_risk::RiskConfig;
 use tokio::sync::watch;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
@@ -41,11 +43,18 @@ use tracing::{debug, error, info, warn};
 /// Polls the shared `FillsStore` at the given interval, picks up any
 /// fills with `seq > last_applied_seq`, and applies them to the
 /// `orders` table.
+///
+/// Drop 19 Part B — G2: after each successful fill application on the
+/// `crypto_leverage` sleeve, the reconciler triggers an immediate
+/// kill-switch evaluation via `crate::evaluate_kill_switch_once`. That
+/// closes the Flash-Crash-Gap between 60s supervisor ticks.
 pub async fn run(
     db: Arc<Database>,
     fills: FillsStore,
     tick_interval: Duration,
     mut shutdown_rx: watch::Receiver<bool>,
+    risk_config: Arc<RiskConfig>,
+    broker: Option<Arc<dyn Broker>>,
 ) {
     info!(
         interval_ms = tick_interval.as_millis() as u64,
@@ -58,7 +67,13 @@ pub async fn run(
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                if let Err(e) = reconcile_once(&db, &fills, &mut last_applied_seq).await {
+                if let Err(e) = reconcile_once(
+                    &db,
+                    &fills,
+                    &mut last_applied_seq,
+                    &risk_config,
+                    broker.as_ref(),
+                ).await {
                     error!(error = %e, "fill reconciler tick failed");
                 }
             }
@@ -76,6 +91,8 @@ async fn reconcile_once(
     db: &Arc<Database>,
     fills: &FillsStore,
     last_applied_seq: &mut u64,
+    risk_config: &Arc<RiskConfig>,
+    broker: Option<&Arc<dyn Broker>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Pull new fills out under the read lock, then release before DB I/O.
     // The FillsRing clones cheaply; copying a handful of Decimal+String
@@ -211,6 +228,21 @@ async fn reconcile_once(
                             transition = ?pos_outcome.transition,
                             "fill applied to position"
                         );
+
+                        // Drop 19 Part B — G2: sofortiger Kill-Switch-
+                        // Event-Trigger. Nur für Leverage-Sleeve; Spot
+                        // und ETF haben keine hard-stop-Semantik.
+                        if sleeve == "crypto_leverage" {
+                            if let Err(e) = crate::evaluate_kill_switch_once(
+                                db, risk_config, broker,
+                            ).await {
+                                error!(
+                                    error = %e,
+                                    "event-triggered kill-switch evaluation failed; \
+                                     supervisor will retry on next 60s tick"
+                                );
+                            }
+                        }
                     }
                     Err(e) => {
                         error!(
@@ -326,6 +358,18 @@ async fn reconcile_once(
                                         "orphan-catcher: position update failed after apply"
                                     );
                                     return Err(Box::new(e));
+                                }
+                                // Drop 19 Part B — G2: Event-Trigger
+                                // auch im Orphan-Pfad.
+                                if sleeve == "crypto_leverage" {
+                                    if let Err(e) = crate::evaluate_kill_switch_once(
+                                        db, risk_config, broker,
+                                    ).await {
+                                        error!(
+                                            error = %e,
+                                            "orphan-catcher: event-triggered kill-switch eval failed"
+                                        );
+                                    }
                                 }
                             }
                         }

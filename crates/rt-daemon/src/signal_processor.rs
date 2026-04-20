@@ -1013,6 +1013,7 @@ fn build_kraken_futures_order(
         created_at: now,
         updated_at: now,
         error_message: None,
+        reduce_only: None,
     })
 }
 

@@ -120,6 +120,14 @@ pub struct Order {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub error_message: Option<String>,
+    /// Drop 19 Part B — G3: Kraken-Futures `reduceOnly` Flag.
+    /// True bei Panic-Close-Orders und anderen Exit-Only-Flows:
+    /// Kraken lehnt die Order ab wenn ihre Ausführung die Position
+    /// in die Gegenrichtung bringen würde. Schützt gegen versehentliches
+    /// Short-gehen bei Doppel-Feuer der Close-Logik.
+    /// None = konventioneller Entry (kein reduceOnly).
+    #[serde(default)]
+    pub reduce_only: Option<bool>,
 }
 
 #[cfg(test)]
