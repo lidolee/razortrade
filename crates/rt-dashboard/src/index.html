@@ -1032,10 +1032,10 @@ th.num { text-align: right; }
 <main>
   <!-- ============== TRADING TAB ============== -->
   <section class="tab active" id="tab-trading">
+    <div class="viewport-grid">
 
-    <!-- ROW 0: Kill-switch status banner — FULL WIDTH, TOP PRIORITY ------- -->
-    <div class="grid cols-1" style="margin-bottom: 14px;">
-      <div class="card kill-switch-card" id="ks-card">
+      <!-- Kill-Switch Banner: full width top ---------------------------- -->
+      <div class="card kill-switch-card vg-ks" id="ks-card">
         <h2>
           <span>Kill-switch</span>
           <span id="ks-state-pill" class="pill dim">loading…</span>
@@ -1045,46 +1045,40 @@ th.num { text-align: right; }
           <div class="ks-detail mono" id="ks-detail"></div>
         </div>
       </div>
-    </div>
 
-    <!-- ROW 1: Equity KPIs + Effective-PnL-Gauge side-by-side ------------- -->
-    <div class="grid cols-4" style="margin-bottom: 14px;">
-      <div class="card">
+      <!-- 4 KPIs ------------------------------------------------------- -->
+      <div class="card vg-kpi-1">
         <h2>Total Equity</h2>
         <div class="figure-big" id="equity-total">—</div>
         <div class="sparkline" id="spark-equity"></div>
         <div class="figure-label" id="equity-updated">—</div>
       </div>
-      <div class="card">
+      <div class="card vg-kpi-2">
         <h2>Cash CHF</h2>
         <div class="figure-mid" id="equity-cash">—</div>
         <div class="figure-label">flex account USD → CHF</div>
       </div>
-      <div class="card">
+      <div class="card vg-kpi-3">
         <h2>Leverage CHF</h2>
         <div class="figure-mid" id="equity-leverage">—</div>
         <div class="sparkline" id="spark-leverage"></div>
         <div class="figure-label">fi_xbtusd portfolio value</div>
       </div>
-      <div class="card">
+      <div class="card vg-kpi-4">
         <h2>Realised PnL CHF</h2>
         <div class="figure-mid" id="equity-realized">—</div>
         <div class="sparkline" id="spark-realized"></div>
         <div class="figure-label">CryptoLeverage lifetime</div>
       </div>
-    </div>
 
-    <!-- ROW 2: Risk budgets — Effective PnL gauge + Exposure bars --------- -->
-    <div class="grid cols-2" style="margin-bottom: 14px;">
-      <div class="card">
+      <!-- Risk row: Effective PnL + Exposure --------------------------- -->
+      <div class="card vg-effpnl">
         <h2>
           <span>Effective PnL Leverage Sleeve</span>
           <span id="eff-pnl-sign" class="pill dim">—</span>
         </h2>
         <div class="figure-big" id="eff-pnl-value">—</div>
-        <div class="figure-label" id="eff-pnl-detail">
-          realised + unrealised
-        </div>
+        <div class="figure-label" id="eff-pnl-detail">realised + unrealised</div>
         <div class="gauge-row">
           <div class="gauge-track">
             <div class="gauge-fill" id="eff-pnl-bar-soft" style="width: 0%;"></div>
@@ -1097,93 +1091,67 @@ th.num { text-align: right; }
           </div>
         </div>
       </div>
-
-      <div class="card">
+      <div class="card vg-exposure">
         <h2>Exposure vs Budget</h2>
-        <div id="exposure-body">
-          <div class="empty">loading…</div>
-        </div>
+        <div id="exposure-body"><div class="empty">loading…</div></div>
       </div>
-    </div>
 
-    <!-- ROW 3: Equity chart + Funding rate side-by-side ------------------- -->
-    <div class="grid cols-2" style="margin-bottom: 14px;">
-      <div class="card">
+      <!-- Chart + Funding side ----------------------------------------- -->
+      <div class="card vg-chart">
         <h2>Equity — 24h</h2>
-        <div class="chart-wrap" style="height: 240px;"><canvas id="equity-chart"></canvas></div>
+        <div class="chart-wrap"><canvas id="equity-chart"></canvas></div>
       </div>
-      <div class="card">
+      <div class="card vg-funding">
         <h2>
           <span>Funding rate</span>
           <span class="pill dim" id="funding-horizon">per 8h</span>
         </h2>
-        <div class="figure-big" id="funding-value">—</div>
-        <div class="figure-label" id="funding-detail">
-          PI_XBTUSD perpetual
-        </div>
-        <div class="footnote" style="margin-top: 10px;">
-          Positive = longs pay shorts · negative = shorts pay longs. Realised funding accrues to
-          the leverage sleeve every 8 h.
-        </div>
+        <div class="figure-mid" id="funding-value">—</div>
+        <div class="figure-label" id="funding-detail">PI_XBTUSD perpetual</div>
       </div>
-    </div>
+      <div class="card vg-fillstats">
+        <h2>Fill reconciliation · 24h</h2>
+        <div id="fill-stats-body" class="scroll-body"><div class="empty">loading…</div></div>
+      </div>
 
-    <!-- ROW 4: Positions + orders (unchanged data, restyled) -------------- -->
-    <div class="grid cols-2" style="margin-bottom: 14px;">
-      <div class="card">
+      <!-- Four tables row ---------------------------------------------- -->
+      <div class="card vg-positions">
         <h2>Open Positions</h2>
-        <div id="positions-body"><div class="empty">no open positions</div></div>
+        <div id="positions-body" class="scroll-body"><div class="empty">no open positions</div></div>
       </div>
-      <div class="card">
+      <div class="card vg-orders">
         <h2>Recent Orders</h2>
-        <div id="orders-body"><div class="empty">no orders yet</div></div>
+        <div id="orders-body" class="scroll-body"><div class="empty">no orders yet</div></div>
       </div>
-    </div>
-
-    <!-- ROW 4.5: Trade journal pipeline + Signal success rates ------------ -->
-    <div class="grid cols-2" style="margin-bottom: 14px;">
-      <div class="card">
+      <div class="card vg-timeline">
+        <h2>Event timeline</h2>
+        <div id="timeline-body" class="scroll-body"><div class="empty">loading…</div></div>
+      </div>
+      <div class="card vg-pipeline">
         <h2>Trade journal pipeline</h2>
-        <div id="pipeline-body"><div class="empty">loading…</div></div>
+        <div id="pipeline-body" class="scroll-body"><div class="empty">loading…</div></div>
       </div>
-      <div class="card">
+
+      <!-- Bottom: signal-stats + ks-history + signals ------------------ -->
+      <div class="card vg-sigstats">
         <h2>
           <span>Signal success rates</span>
           <span class="pill dim" id="sigstats-pill">all-time</span>
         </h2>
-        <div id="sigstats-body"><div class="empty">loading…</div></div>
+        <div id="sigstats-body" class="scroll-body"><div class="empty">loading…</div></div>
       </div>
-    </div>
-
-    <!-- ROW 5: Event timeline + Fill reconciliation stats ----------------- -->
-    <div class="grid cols-2" style="margin-bottom: 14px;">
-      <div class="card">
-        <h2>Event timeline</h2>
-        <div id="timeline-body"><div class="empty">loading…</div></div>
-      </div>
-      <div class="card">
-        <h2>Fill reconciliation · 24h</h2>
-        <div id="fill-stats-body"><div class="empty">loading…</div></div>
-      </div>
-    </div>
-
-    <!-- ROW 5.5: Kill-switch event history table -------------------------- -->
-    <div class="grid cols-1" style="margin-bottom: 14px;">
-      <div class="card">
+      <div class="card vg-kshistory">
         <h2>
           <span>Kill-switch history</span>
           <span class="pill dim" id="ks-history-count">—</span>
         </h2>
-        <div id="ks-history-body"><div class="empty">loading…</div></div>
+        <div id="ks-history-body" class="scroll-body"><div class="empty">loading…</div></div>
       </div>
-    </div>
-
-    <!-- ROW 6: Signals (unchanged) ---------------------------------------- -->
-    <div class="grid cols-1">
-      <div class="card">
+      <div class="card vg-signals">
         <h2>Recent Signals</h2>
-        <div id="signals-body"><div class="empty">no signals yet</div></div>
+        <div id="signals-body" class="scroll-body"><div class="empty">no signals yet</div></div>
       </div>
+
     </div>
   </section>
 
@@ -2589,22 +2557,113 @@ window.setTextPulsed = function(el, newText) {
 
 <style>
 /* ============================================================
-   Drop 19 Turn 5: 16:9-Optimierung + Bewegung + Schweizer Clean
+   Drop 19 Turn 5: 16:9 viewport-fit layout (trading tab)
    ============================================================ */
 
-/* 16:9 Desktop-Monitor (1920x1080): Main-Area etwas kompakter damit
-   ein Tab "above-the-fold" passt. Mobile bleibt unberührt. */
-@media (min-width: 1400px) {
-  main { max-width: 1840px; padding: 12px 18px; }
-  .grid { gap: 12px; }
-  .card { padding: 14px 16px; }
-  .card h2 { font-size: 13px; letter-spacing: 0.06em; margin-bottom: 10px; }
-  .kpi-value, .kpi .value { font-size: 28px; line-height: 1.1; }
-  table { font-size: 12px; }
-  table th, table td { padding: 4px 8px; }
+/* main-container: full viewport, kein outer scroll */
+main {
+  height: calc(100vh - 68px); /* header ≈ 64-68px */
+  max-height: calc(100vh - 68px);
+  padding: 10px 14px;
+  max-width: none;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+.tab { height: 100%; }
+.tab.active { display: block; height: 100%; }
+
+/* Haupt-Grid: 12 Spalten, 6 Zeilen mit definierten Höhen.
+   Jede Zelle ist eine Card. Die Gesamthöhe = 100% der Main-Area. */
+.viewport-grid {
+  display: grid;
+  height: 100%;
+  gap: 8px;
+  grid-template-columns: repeat(12, 1fr);
+  grid-template-rows:
+    54px        /* kill-switch banner */
+    86px        /* 4 KPIs */
+    150px       /* effective-pnl + exposure */
+    1fr         /* chart + funding + fillstats */
+    1fr         /* 4 tables */
+    1fr;        /* sigstats + kshistory + signals */
+  grid-template-areas:
+    "ks  ks  ks  ks  ks  ks  ks  ks  ks  ks  ks  ks"
+    "k1  k1  k1  k2  k2  k2  k3  k3  k3  k4  k4  k4"
+    "ep  ep  ep  ep  ep  ep  ex  ex  ex  ex  ex  ex"
+    "ch  ch  ch  ch  ch  ch  ch  ch  fu  fu  fs  fs"
+    "po  po  po  or  or  or  tl  tl  tl  pl  pl  pl"
+    "ss  ss  ss  ss  kh  kh  kh  kh  sg  sg  sg  sg";
+}
+.vg-ks        { grid-area: ks; }
+.vg-kpi-1     { grid-area: k1; }
+.vg-kpi-2     { grid-area: k2; }
+.vg-kpi-3     { grid-area: k3; }
+.vg-kpi-4     { grid-area: k4; }
+.vg-effpnl    { grid-area: ep; }
+.vg-exposure  { grid-area: ex; }
+.vg-chart     { grid-area: ch; }
+.vg-funding   { grid-area: fu; }
+.vg-fillstats { grid-area: fs; }
+.vg-positions { grid-area: po; }
+.vg-orders    { grid-area: or; }
+.vg-timeline  { grid-area: tl; }
+.vg-pipeline  { grid-area: pl; }
+.vg-sigstats  { grid-area: ss; }
+.vg-kshistory { grid-area: kh; }
+.vg-signals   { grid-area: sg; }
+
+/* Cards innerhalb Grid: eigener overflow, kompakt */
+.viewport-grid .card {
+  padding: 8px 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0;
+}
+.viewport-grid .card h2 {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  margin: 0 0 6px 0;
+  flex-shrink: 0;
+}
+.viewport-grid .figure-big { font-size: 22px; line-height: 1.1; margin: 2px 0; }
+.viewport-grid .figure-mid { font-size: 18px; line-height: 1.1; margin: 2px 0; }
+.viewport-grid .figure-label { font-size: 10px; margin-top: 2px; }
+.viewport-grid .sparkline { height: 20px; margin: 2px 0; }
+
+/* Scrollable inner body für Tabellen/Listen */
+.viewport-grid .scroll-body {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+.viewport-grid .scroll-body table { font-size: 11px; }
+.viewport-grid .scroll-body table th,
+.viewport-grid .scroll-body table td { padding: 2px 6px; }
+
+/* Equity chart: fill card (no fixed 240px) */
+.viewport-grid .chart-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  height: auto !important;
+}
+.viewport-grid .chart-wrap canvas {
+  max-width: 100%;
+  max-height: 100%;
 }
 
-/* Zahlen-Flash: kurzer Cyan-Puls bei Wertänderung. */
+/* KPI-Cards kompakt */
+.vg-ks .ks-body { flex: 1; display: flex; gap: 12px; align-items: center; min-height: 0; }
+.vg-ks .ks-summary { font-size: 13px; }
+.vg-ks .ks-detail { font-size: 10px; opacity: 0.6; }
+
+/* Effective PnL Gauge minimal */
+.vg-effpnl .gauge-row { margin-top: 6px; }
+.vg-effpnl .gauge-legend { font-size: 10px; }
+
+/* Zahlen-Flash */
 @keyframes rtFlashPulse {
   0%   { background-color: rgba(0, 200, 255, 0.25); }
   100% { background-color: transparent; }
@@ -2614,26 +2673,33 @@ window.setTextPulsed = function(el, newText) {
   border-radius: 3px;
 }
 
-/* Kill-Switch-Banner: wenn armed, zusätzlicher Puls (kein Layout-Shift). */
+/* Kill-Switch-Puls */
 @keyframes rtBannerPulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(220, 50, 50, 0.55); }
   50%      { box-shadow: 0 0 0 6px rgba(220, 50, 50, 0.0); }
 }
-.kill-switch-banner.armed,
-.kill-switch-banner.is-soft,
-.kill-switch-banner.is-hard,
-#ks-card.is-soft,
-#ks-card.is-hard {
+#ks-card.is-soft, #ks-card.is-hard {
   animation: rtBannerPulse 2s ease-in-out infinite;
 }
 
-/* Sparkline-Container: dünne Mini-Chart unter KPI-Werten. */
-.sparkline {
-  display: block;
-  width: 100%;
-  height: 28px;
-  margin-top: 4px;
-  opacity: 0.65;
+/* Viewport zu klein: Fallback auf Scroll (aber nicht auf 16:9 Desktop) */
+@media (max-height: 720px), (max-width: 1200px) {
+  main { height: auto; max-height: none; overflow: visible; }
+  .viewport-grid {
+    height: auto;
+    grid-template-rows: auto;
+    grid-template-areas:
+      "ks  ks  ks  ks  ks  ks  ks  ks  ks  ks  ks  ks"
+      "k1  k1  k1  k2  k2  k2  k3  k3  k3  k4  k4  k4"
+      "ep  ep  ep  ep  ep  ep  ex  ex  ex  ex  ex  ex"
+      "ch  ch  ch  ch  ch  ch  ch  ch  fu  fu  fs  fs"
+      "po  po  po  po  po  po  or  or  or  or  or  or"
+      "tl  tl  tl  tl  tl  tl  pl  pl  pl  pl  pl  pl"
+      "ss  ss  ss  ss  ss  ss  kh  kh  kh  kh  kh  kh"
+      "sg  sg  sg  sg  sg  sg  sg  sg  sg  sg  sg  sg";
+  }
+  .viewport-grid .card { min-height: 140px; }
+  .viewport-grid .chart-wrap { min-height: 200px; }
 }
 </style>
 </body>
