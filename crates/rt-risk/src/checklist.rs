@@ -93,6 +93,15 @@ pub enum RejectionReason {
         side: String,
         existing_quantity: Decimal,
     },
+    /// Drop 19 LF-A1: eine bestehende offene Position auf demselben
+    /// Instrument ist zu nah am Liquidationspunkt. Ein neuer Entry
+    /// würde das Portfolio weiter exponieren während der bestehende
+    /// Trade bereits im ATR-Puffer-Risiko steht.
+    LiquidationTooClose {
+        instrument_symbol: String,
+        distance_atrs: Decimal,
+        min_required_atrs: Decimal,
+    },
     KillSwitchActive,
     InvalidSignal {
         detail: String,
@@ -127,6 +136,8 @@ impl RejectionReason {
                 format!("notional {notional_chf} CHF exceeds per-order cap {limit_chf} CHF"),
             Self::DuplicatePositionOpen { instrument_symbol, side, existing_quantity } =>
                 format!("already open position on {instrument_symbol} {side} (qty {existing_quantity}); refusing duplicate entry"),
+            Self::LiquidationTooClose { instrument_symbol, distance_atrs, min_required_atrs } =>
+                format!("liquidation too close on {instrument_symbol}: {distance_atrs} ATR < required {min_required_atrs}"),
             Self::KillSwitchActive =>
                 "kill-switch is active; no leveraged trades accepted".to_string(),
             Self::InvalidSignal { detail } =>
@@ -215,6 +226,7 @@ impl PreTradeChecklist {
             Box::new(VolatilityRegimeCheck),
             Box::new(HardLimitCheck),
             Box::new(DuplicatePositionCheck),
+            Box::new(LiquidationDistanceCheck),
             Box::new(FundingRateCheck),
             Box::new(NotionalCapCheck),
         ])

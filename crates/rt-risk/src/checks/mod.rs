@@ -7,6 +7,7 @@
 pub mod duplicate_position;
 pub mod funding_rate;
 pub mod hard_limit;
+pub mod liquidation_distance;
 pub mod notional_cap;
 pub mod spread_liquidity;
 pub mod staleness;
@@ -15,6 +16,7 @@ pub mod volatility;
 pub use duplicate_position::DuplicatePositionCheck;
 pub use funding_rate::FundingRateCheck;
 pub use hard_limit::HardLimitCheck;
+pub use liquidation_distance::LiquidationDistanceCheck;
 pub use notional_cap::NotionalCapCheck;
 pub use spread_liquidity::SpreadLiquidityCheck;
 pub use staleness::StalenessCheck;

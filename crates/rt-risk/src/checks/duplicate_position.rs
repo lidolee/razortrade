@@ -173,6 +173,9 @@ mod tests {
             instrument_symbol: "PI_XBTUSD".to_string(),
             sleeve: Sleeve::CryptoLeverage,
             quantity: Decimal::from(50), // long
+            avg_entry_price: None,
+            liquidation_price: None,
+            leverage: None,
         }];
         let (s, m, p, c, now) = make_ctx(Side::Buy, existing);
         let ctx = PreTradeContext {
@@ -205,6 +208,9 @@ mod tests {
             instrument_symbol: "PI_XBTUSD".to_string(),
             sleeve: Sleeve::CryptoLeverage,
             quantity: Decimal::from(50),
+            avg_entry_price: None,
+            liquidation_price: None,
+            leverage: None,
         }];
         let (s, m, p, c, now) = make_ctx(Side::Sell, existing);
         let ctx = PreTradeContext {
@@ -223,6 +229,9 @@ mod tests {
             instrument_symbol: "PI_XBTUSD".to_string(),
             sleeve: Sleeve::CryptoLeverage,
             quantity: Decimal::from(-25), // short
+            avg_entry_price: None,
+            liquidation_price: None,
+            leverage: None,
         }];
         let (s, m, p, c, now) = make_ctx(Side::Sell, existing);
         let ctx = PreTradeContext {
@@ -251,6 +260,9 @@ mod tests {
             instrument_symbol: "PI_ETHUSD".to_string(),
             sleeve: Sleeve::CryptoLeverage,
             quantity: Decimal::from(50),
+            avg_entry_price: None,
+            liquidation_price: None,
+            leverage: None,
         }];
         let (s, m, p, c, now) = make_ctx(Side::Buy, existing);
         let ctx = PreTradeContext {
@@ -269,6 +281,9 @@ mod tests {
             instrument_symbol: "PI_XBTUSD".to_string(),
             sleeve: Sleeve::CryptoLeverage,
             quantity: Decimal::from(50),
+            avg_entry_price: None,
+            liquidation_price: None,
+            leverage: None,
         }];
         let mut sig_side = Side::Buy;
         let _ = &sig_side;
@@ -296,6 +311,9 @@ mod tests {
             instrument_symbol: "PI_XBTUSD".to_string(),
             sleeve: Sleeve::CryptoLeverage,
             quantity: Decimal::ZERO,
+            avg_entry_price: None,
+            liquidation_price: None,
+            leverage: None,
         }];
         let (s, m, p, c, now) = make_ctx(Side::Buy, existing);
         let ctx = PreTradeContext {

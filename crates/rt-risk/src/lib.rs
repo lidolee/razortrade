@@ -125,6 +125,21 @@ pub struct RiskConfig {
     /// weaker than USD, a rough mid-2020s mid).
     #[serde(default = "default_usd_per_chf_fallback")]
     pub usd_per_chf_fallback: Decimal,
+
+    /// Drop 19 LF-A1: Mindestabstand zum Liquidationspreis, gemessen
+    /// in ATRs. Unterhalb dieses Wertes wird ein neuer Leverage-Entry
+    /// abgelehnt, weil ein einziger gewöhnlicher ATR-Move die Position
+    /// wegliquidieren würde. Default 2.0 (konservativ: 2 ATR Puffer).
+    /// Bei 2x Leverage und 300 CHF ist dieser Check praktisch immer
+    /// `Approved` — er wird erst relevant wenn höhere Hebel oder
+    /// mehrere korrelierte Positionen ins Spiel kommen. `#[serde(default)]`
+    /// damit alte Configs nicht brechen.
+    #[serde(default = "default_min_liq_distance_atrs")]
+    pub min_liq_distance_atrs: Decimal,
+}
+
+fn default_min_liq_distance_atrs() -> Decimal {
+    Decimal::from(2)
 }
 
 fn default_max_notional_chf_per_order() -> Decimal {
@@ -166,6 +181,7 @@ impl Default for RiskConfig {
             usd_per_chf_fallback: default_usd_per_chf_fallback(),
             kill_switch_effective_threshold_chf:
                 default_kill_switch_effective_threshold_chf(),
+            min_liq_distance_atrs: default_min_liq_distance_atrs(),
         }
     }
 }

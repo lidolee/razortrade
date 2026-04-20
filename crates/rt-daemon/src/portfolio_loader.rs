@@ -98,6 +98,13 @@ pub async fn load_portfolio_state(
             instrument_symbol: symbol,
             sleeve,
             quantity: qty,
+            // Drop 19 LF-A1: diese Felder werden noch nicht aus der
+            // positions-Tabelle + Kraken-Account gelesen. Feeding
+            // kommt in Drop 20 (neuer equity_writer-Pfad). Bis dahin
+            // fällt LiquidationDistanceCheck auf NotApplicable.
+            avg_entry_price: None,
+            liquidation_price: None,
+            leverage: None,
         });
     }
 

@@ -50,6 +50,21 @@ pub struct OpenPositionSummary {
     /// Stored as a string to match the rest of the domain types which
     /// round-trip through SQLite's TEXT-decimal encoding without loss.
     pub quantity: Decimal,
+    /// Drop 19 Part LF-A1: Entry-Preis (durchschnittlich), nötig für
+    /// grobe Liq-Distance-Abschätzung wenn `liquidation_price` noch
+    /// nicht vom Broker-Account-Endpoint gesetzt wurde.
+    #[serde(default)]
+    pub avg_entry_price: Option<Decimal>,
+    /// Drop 19 Part LF-A1: Kraken-Account-Liquidation-Preis. `None`
+    /// solange `equity_writer` das Feld noch nicht populiert hat
+    /// (geplant für Drop 20). Bei `None` fällt der Liq-Distance-Check
+    /// auf den NotApplicable-Pfad, sodass der Check nicht blockt.
+    #[serde(default)]
+    pub liquidation_price: Option<Decimal>,
+    /// Drop 19 Part LF-A1: Hebel. Nötig als Fallback-Schätzung für
+    /// Liq-Distance wenn `liquidation_price` `None` ist.
+    #[serde(default)]
+    pub leverage: Option<Decimal>,
 }
 
 impl OpenPositionSummary {
