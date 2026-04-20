@@ -1052,6 +1052,7 @@ th.num { text-align: right; }
       <div class="card">
         <h2>Total Equity</h2>
         <div class="figure-big" id="equity-total">—</div>
+        <div class="sparkline" id="spark-equity"></div>
         <div class="figure-label" id="equity-updated">—</div>
       </div>
       <div class="card">
@@ -1062,11 +1063,13 @@ th.num { text-align: right; }
       <div class="card">
         <h2>Leverage CHF</h2>
         <div class="figure-mid" id="equity-leverage">—</div>
+        <div class="sparkline" id="spark-leverage"></div>
         <div class="figure-label">fi_xbtusd portfolio value</div>
       </div>
       <div class="card">
         <h2>Realised PnL CHF</h2>
         <div class="figure-mid" id="equity-realized">—</div>
+        <div class="sparkline" id="spark-realized"></div>
         <div class="figure-label">CryptoLeverage lifetime</div>
       </div>
     </div>
@@ -1384,12 +1387,13 @@ async function refreshSummary() {
   try {
     const r = await fetch('/api/summary');
     const s = await r.json();
-    document.getElementById('equity-total').textContent = fmtCHF(s.total_equity_chf);
-    document.getElementById('equity-cash').textContent = fmtCHF(s.cash_chf);
-    document.getElementById('equity-leverage').textContent = fmtCHF(s.crypto_leverage_value_chf);
+    // Drop 19 Turn 5: Zahlen pulsed + Sparklines aus Equity-History
+    setTextPulsed(document.getElementById('equity-total'), fmtCHF(s.total_equity_chf));
+    setTextPulsed(document.getElementById('equity-cash'), fmtCHF(s.cash_chf));
+    setTextPulsed(document.getElementById('equity-leverage'), fmtCHF(s.crypto_leverage_value_chf));
 
     const realized = document.getElementById('equity-realized');
-    realized.textContent = fmtCHF(s.realized_pnl_chf);
+    setTextPulsed(realized, fmtCHF(s.realized_pnl_chf));
     const rv = parseFloat(s.realized_pnl_chf);
     realized.className = 'figure-mid ' + (rv < 0 ? 'err' : (rv > 0 ? 'ok' : 'dim'));
 
@@ -1401,6 +1405,44 @@ async function refreshSummary() {
       updated.textContent = 'no data';
     }
   } catch (e) { console.error('summary', e); }
+}
+
+// Drop 19 Turn 5: Sparklines unter KPI-Kacheln.
+// Wir machen EINEN Fetch auf equity-history und rendern mehrere Mini-SVGs
+// aus Feldern der History. Kein zusätzlicher API-Call.
+async function refreshSparklines() {
+  try {
+    const r = await fetch('/api/equity-history');
+    const hist = await r.json();
+    if (!Array.isArray(hist) || hist.length < 2) return;
+    renderSpark('spark-equity', hist.map(p => parseFloat(p.total_equity_chf)));
+    renderSpark('spark-leverage', hist.map(p => parseFloat(p.crypto_leverage_value_chf)));
+    renderSpark('spark-realized', hist.map(p => parseFloat(p.realized_pnl_chf)));
+  } catch (e) { /* silent — Sparklines sind nice-to-have */ }
+}
+
+function renderSpark(id, values) {
+  const el = document.getElementById(id);
+  if (!el || !values || values.length < 2) return;
+  const vs = values.filter(v => Number.isFinite(v));
+  if (vs.length < 2) return;
+  const min = Math.min(...vs);
+  const max = Math.max(...vs);
+  const range = max - min || 1;
+  const w = 160, h = 28;
+  const step = w / (vs.length - 1);
+  const pts = vs.map((v, i) => {
+    const x = i * step;
+    const y = h - ((v - min) / range) * h;
+    return x.toFixed(1) + ',' + y.toFixed(1);
+  }).join(' ');
+  const last = vs[vs.length - 1];
+  const first = vs[0];
+  const color = last >= first ? 'var(--ok, #2ecc71)' : 'var(--err, #e74c3c)';
+  el.innerHTML =
+    '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">' +
+    '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>' +
+    '</svg>';
 }
 
 async function refreshEquityChart() {
@@ -2470,6 +2512,7 @@ async function refreshAll() {
   refreshOrders();
   refreshSignals();
   refreshEquityChart();
+  refreshSparklines();
   refreshTimeline();
   refreshFillStats();
   refreshFunding();
@@ -2485,6 +2528,113 @@ async function refreshAll() {
 
 refreshAll();
 setInterval(refreshAll, 5000);
+
+// ============================================================
+// Drop 19 Turn 5: Auto-Cycle Tabs + Puls + Zahlen-Animation
+// ============================================================
+(function turn5Autocycle() {
+  // Tabs alle 10s automatisch wechseln. Wenn der User selbst klickt oder
+  // hovert, Cycle für 20s pausieren (damit Interaktion nicht unterbrochen
+  // wird). Bei Tab-Wechsel per Hand auf den manuell gewählten Tab
+  // resynchronisieren.
+  const CYCLE_MS = 10000;
+  const PAUSE_AFTER_USER_MS = 20000;
+  const TABS = ['trading', 'system'];
+  let pauseUntil = 0;
+
+  function currentTab() {
+    const active = document.querySelector('.tab-btn.active');
+    return active ? active.dataset.tab : TABS[0];
+  }
+  function activateByName(name) {
+    const btn = document.querySelector('.tab-btn[data-tab="' + name + '"]');
+    if (btn) btn.click();
+  }
+  function tick() {
+    if (Date.now() < pauseUntil) return;
+    const cur = currentTab();
+    const idx = TABS.indexOf(cur);
+    const next = TABS[(idx + 1) % TABS.length];
+    activateByName(next);
+  }
+  function pause() { pauseUntil = Date.now() + PAUSE_AFTER_USER_MS; }
+
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    b.addEventListener('click', pause);
+  });
+  // Jede Maus-Interaktion innerhalb der main-Area pausiert Cycle.
+  const mainEl = document.querySelector('main');
+  if (mainEl) {
+    ['mouseenter','mousedown','wheel','touchstart'].forEach(ev => {
+      mainEl.addEventListener(ev, pause, { passive: true });
+    });
+  }
+  setInterval(tick, CYCLE_MS);
+})();
+
+// Puls-Effekt: wenn sich ein KPI-Wert ändert, kurz Flash-Animation.
+// Markert nur Elemente mit class="pulse-target". Wird im Render-Code
+// über setTextPulsed() getriggert.
+window.setTextPulsed = function(el, newText) {
+  if (!el) return;
+  const old = el.textContent;
+  if (old === newText) return;
+  el.textContent = newText;
+  el.classList.remove('flash');
+  // Reflow erzwingen, damit removeTimeout-Flash neu startet:
+  void el.offsetWidth;
+  el.classList.add('flash');
+};
 </script>
+
+<style>
+/* ============================================================
+   Drop 19 Turn 5: 16:9-Optimierung + Bewegung + Schweizer Clean
+   ============================================================ */
+
+/* 16:9 Desktop-Monitor (1920x1080): Main-Area etwas kompakter damit
+   ein Tab "above-the-fold" passt. Mobile bleibt unberührt. */
+@media (min-width: 1400px) {
+  main { max-width: 1840px; padding: 12px 18px; }
+  .grid { gap: 12px; }
+  .card { padding: 14px 16px; }
+  .card h2 { font-size: 13px; letter-spacing: 0.06em; margin-bottom: 10px; }
+  .kpi-value, .kpi .value { font-size: 28px; line-height: 1.1; }
+  table { font-size: 12px; }
+  table th, table td { padding: 4px 8px; }
+}
+
+/* Zahlen-Flash: kurzer Cyan-Puls bei Wertänderung. */
+@keyframes rtFlashPulse {
+  0%   { background-color: rgba(0, 200, 255, 0.25); }
+  100% { background-color: transparent; }
+}
+.flash {
+  animation: rtFlashPulse 600ms ease-out;
+  border-radius: 3px;
+}
+
+/* Kill-Switch-Banner: wenn armed, zusätzlicher Puls (kein Layout-Shift). */
+@keyframes rtBannerPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 50, 50, 0.55); }
+  50%      { box-shadow: 0 0 0 6px rgba(220, 50, 50, 0.0); }
+}
+.kill-switch-banner.armed,
+.kill-switch-banner.is-soft,
+.kill-switch-banner.is-hard,
+#ks-card.is-soft,
+#ks-card.is-hard {
+  animation: rtBannerPulse 2s ease-in-out infinite;
+}
+
+/* Sparkline-Container: dünne Mini-Chart unter KPI-Werten. */
+.sparkline {
+  display: block;
+  width: 100%;
+  height: 28px;
+  margin-top: 4px;
+  opacity: 0.65;
+}
+</style>
 </body>
 </html>
